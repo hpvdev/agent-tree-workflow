@@ -154,6 +154,16 @@ class ForkTests(unittest.TestCase):
         for cmd in (valid + "; touch other", valid + " && echo bad", valid.replace("test", "other"), "python3 -c 'print(1)'"):
             self.assertFalse(controller_call("Bash", {"command": cmd}, "test"))
 
+    def test_read_only_inspection_does_not_repeat_final_astra_review(self):
+        self.journal.put("checkpoint:before_done", {"status": "completed", "agent_id": "review"})
+        self.assertEqual(routing_guard(self.journal, "Bash", {"command": "nl -ba impl.py | sed -n '1,20p'"}, "read"), {})
+        self.assertTrue(finish(self.journal)["passed"])
+        self.assertEqual(self.journal.get("checkpoint:before_done")["status"], "completed")
+        for command in ("sed -i '' 's/1/2/' impl.py", "rg example impl.py > result.txt", "python3 change.py"):
+            self.assertEqual(routing_guard(self.journal, "Bash", {"command": command}, "change"), {})
+            self.assertIsNone(self.journal.get("checkpoint:before_done"))
+            self.journal.put("checkpoint:before_done", {"status": "completed", "agent_id": "review"})
+
     def test_hooks_turn_isolation_and_native_astra(self):
         base = {"cwd": str(self.root), "session_id": "parent", "model": "gpt-6-sol"}
         def hook(event, **values):

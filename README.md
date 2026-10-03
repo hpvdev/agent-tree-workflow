@@ -98,9 +98,11 @@ Ví dụ input/lệnh được cài trong `AGENTS.md`. Dùng `fork --json 'JSON'
 
 `before_plan` và `before_done` bắt buộc trong workflow này; `error_repeats` khi lỗi tái diễn. Astra không chạy trên mọi tool call. Controller đối chiếu agent mới, role/model, thời điểm tạo và trạng thái hoàn tất; metadata không đánh giá chất lượng nhận xét.
 
+Trước `before_plan`, xác định đúng tính năng khi tên gọi có thể chỉ nhiều luồng khác nhau. Sol có thể đọc hẹp để phân biệt hoặc hỏi rõ phạm vi; Astra chỉ review mục tiêu đã xác định.
+
 Hooks tự ghi lỗi khi tool response có `isError` hoặc exit code khác 0. Lỗi khác cần Sol báo qua `failure`; không đếm lại một lần lỗi đã ghi. Failure fingerprint tự động dựa trên tool/input giống nhau; nhận ra cùng nguyên nhân qua các lệnh khác nhau vẫn cần Sol. Mỗi lần tái diễn cần Astra mới trước tiếp tục. Retry mặc định tối đa một lần cho cùng failure key.
 
-Fork mới sau review cuối làm hết hiệu lực `before_done`. Sol cũng phải yêu cầu review lại nếu thay đổi liên quan phát sinh ngoài fork. Stop hook nhắc hoàn tất một lần; nếu vẫn thiếu, báo audit chưa đạt, không tạo vòng lặp vô hạn hoặc tự đánh dấu đạt. Launcher trả exit 2 khi CLI thành công nhưng workflow chưa đủ.
+Fork mới sau review cuối làm hết hiệu lực `before_done`. Sol cũng phải yêu cầu review lại nếu thay đổi liên quan phát sinh ngoài fork. Các lệnh đọc mã thông dụng như `rg`, `nl`, `sed -n` và `git diff` không hủy review đã hoàn tất; lệnh sửa file hoặc lệnh không nhận diện được vẫn hủy để giữ an toàn. Stop hook nhắc hoàn tất một lần; nếu vẫn thiếu, báo audit chưa đạt, không tạo vòng lặp vô hạn hoặc tự đánh dấu đạt. Launcher trả exit 2 khi CLI thành công nhưng workflow chưa đủ.
 
 `--approve-for-me` chỉ áp dụng khi chạy launcher với `approval_mode=auto-review`. Phiên mở trực tiếp trong app dùng quyền native đã chọn; hook không tự bật hoặc phê duyệt thay Codex.
 

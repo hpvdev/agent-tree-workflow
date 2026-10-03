@@ -45,6 +45,47 @@ def controller_call(tool, arguments, run):
             len(tail) in (2, 4) and tail[0] == "checkpoint" and tail[1] in ("before_plan", "before_done", "error_repeats") and (len(tail) == 2 or tail[2] == "--agent-id"))
 
 
+def read_only_call(tool, arguments):
+    """Keep a completed review when a shell call only inspects project files."""
+    if tool not in ("Bash", "exec_command", "shell_command") or not isinstance(arguments, dict):
+        return False
+    command = arguments.get("command", arguments.get("cmd"))
+    if not isinstance(command, str) or "$" in command or "`" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|;&<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    parts = [[]]
+    for token in tokens:
+        if token == "|":
+            if not parts[-1]:
+                return False
+            parts.append([])
+        elif token and all(char in "|;&<>" for char in token):
+            return False
+        else:
+            parts[-1].append(token)
+    if not parts[-1]:
+        return False
+    for part in parts:
+        command_name = Path(part[0]).name
+        if command_name == "git":
+            if (len(part) < 2 or part[1] not in ("status", "diff", "show", "log") or
+                    any(arg == "--ext-diff" or arg == "-o" or arg.startswith("--output") for arg in part[2:])):
+                return False
+        elif command_name in ("rg", "grep", "nl", "head", "tail", "cat", "ls", "pwd", "wc"):
+            if command_name == "rg" and any(arg == "--pre" or arg.startswith("--pre=") for arg in part[1:]):
+                return False
+        elif command_name == "sed" and len(part) in (3, 4) and part[1] == "-n" and re.fullmatch(r"[0-9,;p ]+", part[2]) and (len(part) == 3 or not part[3].startswith("-")):
+            pass
+        else:
+            return False
+    return True
+
+
 def routing_guard(journal, tool, arguments, call_id):
     if controller_call(tool, arguments, journal.run_id):
         return {}
@@ -59,7 +100,7 @@ def routing_guard(journal, tool, arguments, call_id):
     repeated = journal.get("checkpoint:error_repeats")
     if repeated and repeated["status"] != "completed":
         return deny("Lỗi lặp lại: cần hoàn tất checkpoint Astra error_repeats trước khi tiếp tục thực thi.")
-    if (journal.get("checkpoint:before_done") or {}).get("status") == "completed":
+    if (journal.get("checkpoint:before_done") or {}).get("status") == "completed" and not read_only_call(tool, arguments):
         journal.put("checkpoint:before_done", None)
         journal.emit("checkpoint.invalidated", name="before_done")
     if native_event(journal, tool, arguments, call_id, "pre"):
