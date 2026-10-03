@@ -222,6 +222,7 @@ def handle(data, root=ROOT):
             if not audit["passed"]:
                 if data.get("stop_hook_active") or journal.get("stop_reminded"):
                     journal.emit("session.audit_incomplete", missing=audit["missing"])
+                    finalize_retro(journal, False)
                     return {"systemMessage": "Agent Tree: lượt này chưa đạt workflow. Còn thiếu checkpoint hoặc quyết định chưa xử lý; không tự đánh dấu hoàn tất."}
                 journal.put("stop_reminded", True)
                 return {"decision": "block", "reason": "Agent Tree audit incomplete for run " + run + ": " + json.dumps(audit) + ". Complete missing steps if possible; otherwise report the actual limitation. Do not edit journal or fabricate reviews."}

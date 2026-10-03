@@ -181,6 +181,8 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(hook("PermissionRequest", tool_name="Bash", tool_input={"command": "private"}), {})
         self.assertEqual(hook("Stop")["decision"], "block")
         self.assertNotIn("decision", hook("Stop", stop_hook_active=True))
+        with JournalContext(self.root, run) as journal:
+            self.assertFalse(journal.get("retro")["workflow_passed"])
         second = hook("UserPromptSubmit", turn_id="turn-2")
         self.assertNotEqual(first, second)
         with JournalContext(self.root, "sessions") as index:
