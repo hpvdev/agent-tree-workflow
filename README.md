@@ -116,6 +116,8 @@ python3 .agent-tree/watch.py --list
 python3 .agent-tree/watch.py --session SESSION_ID
 ```
 
+Dashboard vẽ cây Sol → Jev → các agent → Sol, với Astra ở cạnh. Đường nối có điểm sáng chạy và biểu tượng quay khi có hoạt động vừa ghi nhận; các xác suất Jev và trạng thái agent lấy từ sự kiện thật. Sau 15 giây không có sự kiện mới, chuyển sang chờ dữ liệu, không suy ra agent đã dừng. Nhật ký đã kết thúc đứng yên. Cửa sổ từ 89 cột × 35 dòng hiển thị cây đầy đủ; cửa sổ nhỏ tự dùng bố cục gọn.
+
 Dashboard đọc journal, không gọi model, không mở phiên làm việc mới. Nó theo dõi các lượt mới của cùng session: Jev sharp/split và lựa chọn, tool đang chạy/đã trả về, agent/role/model, checkpoint Astra. Ctrl+C chỉ đóng dashboard. Dữ liệu host chưa cung cấp, như token ở hook mode, hiển thị chưa có dữ liệu.
 
 Log cục bộ trong `.agent-tree/logs/RUN_ID/events.sqlite3`; index phiên ở `logs/sessions/`. Hook log không giữ raw prompt/tool output. Launcher còn lưu `codex.jsonl`, `timeline.jsonl`, `stderr.log` có thể chứa nội dung task; không chia sẻ nếu chưa kiểm tra. Logs được bỏ qua khi commit Git và giữ lại khi gỡ.

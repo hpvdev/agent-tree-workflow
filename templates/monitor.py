@@ -9,6 +9,7 @@ import sys
 import os
 import queue
 import threading
+from display import frame
 from runtime import Journal
 from observer import Observer
 
@@ -34,11 +35,29 @@ class Monitor:
         self.checkpoints = {}
         self.agent_details = {}
         self.decisions = {}
+        self.activity_time = None
+        self.animation_stopped = True
+        self.phase = None
+        self.playback = False
+        self.last_frame = None
 
     def accept(self, event):
         kind = event.get("type", "unknown")
         item = event.get("item") or {}
         label = kind
+        self.activity_time = event.get("time", datetime.now().astimezone().isoformat())
+        if kind in ("session.turn", "turn.started", "fork.started", "agent.observed") or kind == "tool.activity" and event.get("status") == "started":
+            self.animation_stopped = False
+        if kind in ("session.turn_completed", "turn.completed", "turn.failed", "session.audit_incomplete", "workflow.audit", "error") or kind == "session.lifecycle":
+            self.animation_stopped = True
+        if kind.startswith("fork."):
+            self.phase = "jev"
+        elif kind.startswith("agent."):
+            self.phase = "agent"
+        elif kind == "tool.activity":
+            self.phase = "tool"
+        elif kind.startswith("checkpoint."):
+            self.phase = "review"
         if kind == "session.turn":
             self.status = "Đang chạy"
             label = "Phiên " + event.get("session", "") + " · nhận yêu cầu mới"
@@ -131,30 +150,17 @@ class Monitor:
         entry = str(event.get("time", datetime.now().strftime("%H:%M:%S"))) + "  " + clean(label)
         self.events.append(entry)
         if self.live:
-            print("\033[2J\033[H", end="")
-            print("AGENT TREE  |  " + self.status)
-            if self.caption:
-                print(clean(self.caption))
-            print("Main cấu hình: " + clean(self.settings.get("main_model", "không có")))
-            print("Jev: " + str(self.forks) + " forks | sharp " + str(self.sharp) + " | split → Sol " + str(self.split))
-            for fork_kind, decision in self.decisions.items():
-                confidence = decision.get("confidence")
-                bar = ("█" * round(confidence * 12)).ljust(12, "░") if confidence is not None else "unavailable "
-                print("  " + fork_kind.ljust(14) + " [" + bar + "] " + decision["route"])
-            astra_calls = sum(d.get("role") == "agent_tree_astra" for d in self.agent_details.values())
-            astra_usage = [(d.get("usage") or {}).get("input_tokens") for d in self.agent_details.values() if d.get("role") == "agent_tree_astra"]
-            astra_tokens = str(sum(astra_usage)) if astra_usage and all(v is not None for v in astra_usage) else "chưa có dữ liệu"
-            print("Astra: " + str(astra_calls) + " calls | input tokens " + astra_tokens)
-            print("Checkpoints: " + clean(self.checkpoints))
-            print("Main")
-            for agent, status in self.agents.items():
-                detail = self.agent_details.get(agent, {})
-                print("  └─ " + clean(detail.get("role", agent), 28) + " · " + clean(detail.get("model") or "?", 24) + " · " + clean(status, 20))
-            if not self.agents:
-                print("  └─ Chưa nhận sự kiện agent phụ")
-            print("\n" + "\n".join(self.events), flush=True)
+            self.draw()
         else:
             print(entry, flush=True)
+
+    def draw(self):
+        if not self.live:
+            return
+        rendered = frame(self)
+        if rendered != self.last_frame:
+            print("\033[H" + rendered + "\033[J", end="", flush=True)
+            self.last_frame = rendered
 
 
 def replay(path):
@@ -229,6 +235,7 @@ def trace(command, root, settings):
                         pass
                 if journal.get("transport") != "hooks":
                     observer.poll()
+                monitor.draw()
                 for event in journal.events(cursor):
                     cursor = event["seq"]
                     monitor.accept(event)

@@ -135,7 +135,7 @@ def install(root, args):
         ".agent-tree/install.py": Path(__file__).read_bytes(),
         ".agent-tree/settings.json": (json.dumps(settings, indent=2) + "\n").encode(),
     }
-    for name in ("runtime.py", "observer.py", "control.py", "hooks.py", "watch.py"):
+    for name in ("runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "display.py"):
         files[".agent-tree/" + name] = (SOURCE / "templates" / name).read_bytes()
     for role in ROLES:
         relative = ".codex/agents/agent_tree_" + role + ".toml"
@@ -299,7 +299,7 @@ def main():
                 elif getattr(args, key, None) is None:
                     setattr(args, key, value)
             # Validate sources before removing the old installation.
-            for name in ("run.py", "monitor.py", "runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "watch.command", "workflow.md"):
+            for name in ("run.py", "monitor.py", "runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "watch.command", "display.py", "workflow.md"):
                 (SOURCE / "templates" / name).read_bytes()
             uninstall(root)
             install(root, args)

@@ -71,7 +71,8 @@ def main():
                     for seq, timestamp, kind, data in rows:
                         cursor = seq
                         view.accept({"seq": seq, "time": timestamp, "type": kind, **json.loads(data)})
-            time.sleep(.5)
+            view.draw()
+            time.sleep(.15)
     except KeyboardInterrupt:
         print("Đã đóng bảng theo dõi; phiên Codex vẫn tiếp tục.")
 
