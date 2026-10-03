@@ -38,7 +38,20 @@ class Monitor:
         kind = event.get("type", "unknown")
         item = event.get("item") or {}
         label = kind
-        if kind in ("agent.observed", "agent.state"):
+        if kind == "session.turn":
+            self.status = "Đang chạy"
+            label = "Phiên " + event.get("session", "") + " · nhận yêu cầu mới"
+        elif kind == "session.turn_completed":
+            self.status = "Hoàn tất lượt"
+            label = self.status
+        elif kind == "session.audit_incomplete":
+            self.status = "Chưa đủ checkpoint"
+            label = self.status
+        elif kind == "tool.activity":
+            label = event.get("role", "agent") + " · " + event.get("tool", "tool") + " · " + event.get("status", "")
+        elif kind == "routing.blocked":
+            label = "JEV · chặn tool chưa khớp nhánh · " + event.get("tool", "")
+        elif kind in ("agent.observed", "agent.state"):
             agent = event["id"]
             self.agent_details.setdefault(agent, {}).update(event)
             self.agents[agent] = event.get("status", "observed")
@@ -125,8 +138,9 @@ class Monitor:
                 bar = ("█" * round(confidence * 12)).ljust(12, "░") if confidence is not None else "unavailable "
                 print("  " + fork_kind.ljust(14) + " [" + bar + "] " + decision["route"])
             astra_calls = sum(d.get("role") == "agent_tree_astra" for d in self.agent_details.values())
-            astra_tokens = sum((d.get("usage") or {}).get("input_tokens", 0) for d in self.agent_details.values() if d.get("role") == "agent_tree_astra")
-            print("Astra: " + str(astra_calls) + " calls | input tokens observed " + str(astra_tokens))
+            astra_usage = [(d.get("usage") or {}).get("input_tokens") for d in self.agent_details.values() if d.get("role") == "agent_tree_astra"]
+            astra_tokens = str(sum(astra_usage)) if astra_usage and all(v is not None for v in astra_usage) else "chưa có dữ liệu"
+            print("Astra: " + str(astra_calls) + " calls | input tokens " + astra_tokens)
             print("Checkpoints: " + clean(self.checkpoints))
             print("Main")
             for agent, status in self.agents.items():
@@ -171,7 +185,7 @@ def trace(command, root, settings):
     command[-1] += ("\n\nAgent Tree run ID: " + stamp + ". Main must follow project workflow. "
                     "Use python3 .agent-tree/control.py --run-id " + stamp + " for checkpoint, fork, resolve, failure, finish. "
                     "Before planning request before_plan and spawn native agent_tree_astra, await and complete with actual agent_id. "
-                    "Use Jev fork for narrow file/tool/retry semantic decisions. Resolve split results as Sol. "
+                    "Use Jev fork for narrow file/tool/agent/retry semantic decisions. Resolve split results as Sol. "
                     "After implementation and verification request before_done, spawn a fresh native Astra, await, complete. "
                     "No checkpoint can be self-attested. Never alter workflow state or scripts to pass audit. "
                     "If model/tool/observer unavailable, report the block. Finally run control finish.")
@@ -209,7 +223,8 @@ def trace(command, root, settings):
                             timeline.write(json.dumps(event) + "\n"); timeline.flush()
                     except ValueError:
                         pass
-                observer.poll()
+                if journal.get("transport") != "hooks":
+                    observer.poll()
                 for event in journal.events(cursor):
                     cursor = event["seq"]
                     monitor.accept(event)
@@ -225,7 +240,8 @@ def trace(command, root, settings):
         finally:
             reader.join(timeout=2)
             process.stdout.close()
-        observer.poll()
+        if journal.get("transport") != "hooks":
+            observer.poll()
         audit = finish(journal)
         for event in journal.events(cursor):
             monitor.accept(event)

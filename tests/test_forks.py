@@ -13,7 +13,8 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "templates"))
 from runtime import Journal
 from observer import Observer
-from control import classify, fork, dispatch, failure, request_checkpoint, complete_checkpoint, finish
+from control import classify, fork, dispatch, failure, request_checkpoint, complete_checkpoint, finish, native_event
+from hooks import handle, routing_guard, controller_call
 from install import JEV_DEFAULTS
 
 
@@ -113,6 +114,110 @@ class ForkTests(unittest.TestCase):
         request_checkpoint(self.journal, "before_done")
         with self.assertRaises(ValueError):
             complete_checkpoint(self.journal, "before_done", "review-id")
+
+    def test_native_selection_requires_matching_real_call(self):
+        request = {**self.request, "kind": "which_tool", "options": {
+            "tests": {"description": "Run existing tests", "action": {"type": "native_tool", "tool": "Bash", "input": {"command": "python3 -m unittest"}}},
+            "stop": {"description": "Stop this operation", "action": {"type": "stop"}}}}
+        with patch("control.subprocess.run", return_value=self.response({"tests": .98, "stop": .01, "sol": .01}, .96)):
+            result = fork(self.journal, request)
+        self.assertEqual(result["status"], "awaiting_native")
+        self.assertIn("decision:" + result["id"], finish(self.journal)["unresolved"])
+        wrong = routing_guard(self.journal, "Bash", {"command": "echo unrelated"}, "call")
+        self.assertEqual(wrong["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(routing_guard(self.journal, "Bash", result["call"]["input"], "call"), {})
+        self.assertEqual(routing_guard(self.journal, "Bash", result["call"]["input"], "call"), {})  # replay
+        self.assertIsNone(native_event(self.journal, "Bash", result["call"]["input"], "wrong-call", "post"))
+        self.assertEqual(native_event(self.journal, "Bash", result["call"]["input"], "call", "post"), result["id"])
+        self.assertIsNone(native_event(self.journal, "Bash", result["call"]["input"], "call-2", "pre"))
+        self.assertEqual(finish(self.journal)["unresolved"], [])
+
+    def test_agent_selection_split_and_cancellation(self):
+        request = {**self.request, "kind": "which_agent", "options": {
+            role: {"description": role, "action": {"type": "spawn_agent", "role": role, "tool": "spawn_agent",
+                    "input": {"agent_type": "agent_tree_" + role, "message": "A public example task"}}}
+            for role in ("worker", "explorer", "researcher")}}
+        denied = routing_guard(self.journal, "spawn_agent", request["options"]["worker"]["action"]["input"], "spawn")
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        with patch("control.subprocess.run", return_value=self.response({"worker": .4, "explorer": .3, "researcher": .2, "sol": .1}, .2)):
+            result = fork(self.journal, request)
+        self.assertEqual(result["route"], "split")
+        result = dispatch(self.journal, result["id"], "explorer", "sol")
+        self.assertEqual(result["call"]["input"]["agent_type"], "agent_tree_explorer")
+        self.assertEqual(result["actor"], "sol")
+        dispatch(self.journal, result["id"], "stop", "sol")
+        self.assertEqual(finish(self.journal)["unresolved"], [])
+
+    def test_controller_escape_does_not_allow_shell_chains(self):
+        valid = "python3 .agent-tree/control.py --run-id test status"
+        self.assertTrue(controller_call("Bash", {"command": valid}, "test"))
+        for cmd in (valid + "; touch other", valid + " && echo bad", valid.replace("test", "other"), "python3 -c 'print(1)'"):
+            self.assertFalse(controller_call("Bash", {"command": cmd}, "test"))
+
+    def test_hooks_turn_isolation_and_native_astra(self):
+        base = {"cwd": str(self.root), "session_id": "parent", "model": "gpt-6-sol"}
+        def hook(event, **values):
+            return handle({**base, "hook_event_name": event, **values}, self.root)
+        first = hook("UserPromptSubmit", turn_id="turn-1", prompt="not logged")
+        with JournalContext(self.root, "sessions") as index:
+            run = index.get("session:parent")["run_id"]
+        with JournalContext(self.root, run) as journal:
+            request_checkpoint(journal, "before_plan")
+        hook("SubagentStart", agent_id="review", agent_type="agent_tree_astra", model="gpt-6-astra")
+        hook("SubagentStop", agent_id="review", agent_type="agent_tree_astra", model="gpt-6-astra")
+        with JournalContext(self.root, run) as journal:
+            complete_checkpoint(journal, "before_plan", "review")
+            self.assertNotIn("not logged", str(journal.events()))
+        self.assertEqual(hook("PermissionRequest", tool_name="Bash", tool_input={"command": "private"}), {})
+        self.assertEqual(hook("Stop")["decision"], "block")
+        self.assertNotIn("decision", hook("Stop", stop_hook_active=True))
+        second = hook("UserPromptSubmit", turn_id="turn-2")
+        self.assertNotEqual(first, second)
+        with JournalContext(self.root, "sessions") as index:
+            next_run = index.get("session:parent")["run_id"]
+        with JournalContext(self.root, next_run) as journal:
+            self.assertIsNone(journal.get("checkpoint:before_plan"))
+        # A late child completion belongs to its original run.
+        hook("SubagentStop", agent_id="review", model="gpt-6-astra")
+        with JournalContext(self.root, next_run) as journal:
+            self.assertIsNone(journal.get("agent:review"))
+
+    def test_launcher_and_hooks_share_run_even_when_prompt_event_replays(self):
+        base = {"cwd": str(self.root), "session_id": "launched-parent", "hook_event_name": "UserPromptSubmit", "turn_id": "one"}
+        with patch.dict("os.environ", {"AGENT_TREE_RUN": "test"}):
+            first = handle(base, self.root)
+            self.assertEqual(handle(base, self.root), first)
+            with JournalContext(self.root, "sessions") as index:
+                self.assertEqual(index.get("session:launched-parent")["run_id"], "test")
+            handle({**base, "turn_id": "two"}, self.root)
+            with JournalContext(self.root, "sessions") as index:
+                self.assertNotEqual(index.get("session:launched-parent")["run_id"], "test")
+
+    def test_hooks_failure_dedup_and_repeat_gate(self):
+        base = {"cwd": str(self.root), "session_id": "parent", "turn_id": "one"}
+        handle({**base, "hook_event_name": "UserPromptSubmit"}, self.root)
+        event = {**base, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "python3 -m unittest"},
+                 "tool_use_id": "first", "tool_response": {"exit_code": 1}}
+        handle(event, self.root)
+        handle(event, self.root)
+        handle({**event, "tool_use_id": "second"}, self.root)
+        with JournalContext(self.root, "sessions") as index:
+            run = index.get("session:parent")["run_id"]
+        with JournalContext(self.root, run) as journal:
+            errors = [e for e in journal.events() if e["type"] == "failure.observed"]
+            self.assertEqual([e["count"] for e in errors], [1, 2])
+            self.assertTrue(all(e["source"] == "native_hook" for e in errors))
+            self.assertEqual(routing_guard(journal, "Bash", {"command": "retry"}, "third")["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertEqual(routing_guard(journal, "spawn_agent", {"agent_type": "agent_tree_astra"}, "review"), {})
+
+
+@contextlib.contextmanager
+def JournalContext(root, run):
+    journal = Journal(root, run)
+    try:
+        yield journal
+    finally:
+        journal.close()
 
 
 if __name__ == "__main__":

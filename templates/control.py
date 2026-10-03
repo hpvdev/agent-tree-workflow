@@ -25,8 +25,21 @@ def project_file(root, name):
 
 
 def validate_action(root, action):
-    if not isinstance(action, dict) or action.get("type") not in ("read_file", "search_text", "stop"):
-        raise ValueError("Chỉ hỗ trợ read_file, search_text hoặc stop; lệnh khác phải qua công cụ native của Sol.")
+    if not isinstance(action, dict) or action.get("type") not in ("read_file", "search_text", "stop", "native_tool", "spawn_agent"):
+        raise ValueError("Action không được hỗ trợ.")
+    if action["type"] in ("native_tool", "spawn_agent"):
+        if not isinstance(action.get("tool"), str) or not action["tool"].strip() or not isinstance(action.get("input"), dict):
+            raise ValueError("Native action cần tool và input object đúng với hook của runtime.")
+        is_spawn = action["tool"].split(".")[-1].split("__")[-1] == "spawn_agent"
+        if is_spawn != (action["type"] == "spawn_agent"):
+            raise ValueError("Lời gọi spawn_agent phải dùng action spawn_agent.")
+        if is_spawn:
+            role = action.get("role")
+            if role not in ("worker", "explorer", "researcher") or action["input"].get("agent_type") != "agent_tree_" + role:
+                raise ValueError("Chọn worker/explorer/researcher và agent_type tương ứng; Astra chỉ qua checkpoint.")
+            if "model" in action["input"] and action["input"]["model"] != settings(root)[role + "_model"]:
+                raise ValueError("Model agent phải khớp cấu hình project.")
+        return
     if action["type"] != "stop":
         project_file(root, action["path"])
     if action["type"] == "search_text" and (not isinstance(action.get("text"), str) or not action["text"]):
@@ -106,7 +119,7 @@ def complete_checkpoint(journal, name, agent_id):
 def fork(journal, request):
     if (journal.get("checkpoint:before_plan") or {}).get("status") != "completed":
         return {"route": "astra", **request_checkpoint(journal, "before_plan")}
-    if request.get("kind") not in ("which_file", "which_tool", "retry_or_stop"):
+    if request.get("kind") not in ("which_file", "which_tool", "which_agent", "retry_or_stop"):
         raise ValueError("Loại điểm rẽ không hợp lệ.")
     options = request.get("options", {})
     if not 2 <= len(options) <= 12 or "sol" in options:
@@ -117,6 +130,8 @@ def fork(journal, request):
         if not isinstance(label, str) or not isinstance(option.get("description"), str):
             raise ValueError("Mỗi lựa chọn cần nhãn và mô tả.")
         validate_action(journal.root, option["action"])
+        if request["kind"] == "which_agent" and option["action"]["type"] not in ("spawn_agent", "stop"):
+            raise ValueError("which_agent chỉ chọn agent hoặc dừng phân công.")
     if request["kind"] == "retry_or_stop":
         key = request.get("failure_key")
         if not key:
@@ -134,6 +149,10 @@ def fork(journal, request):
     if not isinstance(state, str) or not isinstance(question, str) or not state.strip() or not question.strip() or len(state) + len(question) > 12000:
         raise ValueError("Cần state/question ngắn, rõ ràng (tổng tối đa 12.000 ký tự).")
     config = settings(journal.root)["jev"]
+    # A new operation after final review requires a fresh final review.
+    if (journal.get("checkpoint:before_done") or {}).get("status") == "completed":
+        journal.put("checkpoint:before_done", None)
+        journal.emit("checkpoint.invalidated", name="before_done")
     decision_id = uuid.uuid4().hex
     decision = {"id": decision_id, "kind": request["kind"], "options": options,
                 "failure_key": request.get("failure_key"), "status": "pending"}
@@ -165,7 +184,7 @@ def fork(journal, request):
 
 def dispatch(journal, decision_id, choice, actor):
     decision = journal.get("decision:" + decision_id)
-    if decision and choice == "stop" and choice not in decision["options"] and decision["status"] in ("pending", "failed"):
+    if decision and choice == "stop" and (choice not in decision["options"] or decision["status"] != "pending") and decision["status"] in ("pending", "failed", "awaiting_native", "native_failed"):
         decision["status"] = "cancelled"
         journal.put("decision:" + decision_id, decision)
         journal.emit("fork.cancelled", id=decision_id, actor=actor)
@@ -175,6 +194,12 @@ def dispatch(journal, decision_id, choice, actor):
     if choice == "sol" or choice not in decision["options"]:
         raise ValueError("Chỉ thực hiện lựa chọn trong tập đã khai báo.")
     action = decision["options"][choice]["action"]
+    repeated = journal.get("checkpoint:error_repeats")
+    if action["type"] != "stop" and repeated and repeated["status"] != "completed":
+        raise ValueError("Cần Astra cho lỗi lặp lại trước khi thực thi nhánh tiếp theo.")
+    if decision.get("failure_key") and action["type"] != "stop":
+        if journal.get("failure:" + decision["failure_key"], {}).get("retries", 0) >= settings(journal.root)["jev"]["max_retries"]:
+            raise ValueError("Đã hết lượt retry; dừng quyết định này.")
     previous = json.dumps(decision)
     decision["status"] = "executing"
     cursor = journal.db.execute("UPDATE state SET data=? WHERE key=? AND data=?", (json.dumps(decision), "decision:" + decision_id, previous))
@@ -186,6 +211,14 @@ def dispatch(journal, decision_id, choice, actor):
         failure = journal.get(key)
         failure["retries"] = failure.get("retries", 0) + 1
         journal.put(key, failure)
+    if action["type"] in ("native_tool", "spawn_agent"):
+        decision.update(status="awaiting_native", selected=choice, actor=actor,
+                        native_signature=native_signature(action["tool"], action["input"]))
+        journal.put("decision:" + decision_id, decision)
+        journal.emit("fork.ready", id=decision_id, choice=choice, actor=actor, tool=action["tool"], role=action.get("role"))
+        return {"id": decision_id, "route": decision["route"], "choice": choice, "actor": actor,
+                "status": "awaiting_native", "call": {"tool": action["tool"], "input": action["input"]},
+                "instruction": "Invoke exactly this native tool. This is a routing decision, NOT execution approval. Pre/PostToolUse hooks must observe the call before audit can pass."}
     try:
         result = execute(journal.root, action)
         decision["status"] = "completed"
@@ -197,12 +230,45 @@ def dispatch(journal, decision_id, choice, actor):
     return {"id": decision_id, "route": decision["route"], "choice": choice, "actor": actor, "result": result}
 
 
-def failure(journal, key):
+def native_signature(tool, arguments):
+    return hashlib.sha256(json.dumps([tool, arguments], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def native_event(journal, tool, arguments, call_id, phase, failed=False):
+    """Bind a selected branch to one observed invocation; never self-attest execution."""
+    signature = native_signature(tool, arguments)
+    journal.db.execute("BEGIN IMMEDIATE")
+    try:
+        rows = journal.db.execute("SELECT key,data FROM state WHERE key LIKE 'decision:%' ORDER BY rowid").fetchall()
+        for key, raw in rows:
+            decision = json.loads(raw)
+            same_call = decision.get("call_id") == call_id and decision.get("native_signature") == signature
+            if phase == "pre" and same_call and decision["status"] == "native_running":
+                journal.db.commit()
+                return decision["id"]
+            eligible = (phase == "pre" and decision["status"] == "awaiting_native" and decision.get("native_signature") == signature or
+                        phase == "post" and same_call and decision["status"] == "native_running")
+            if not eligible or not call_id:
+                continue
+            decision.update(status="native_running" if phase == "pre" else ("native_failed" if failed else "completed"), call_id=call_id)
+            journal.db.execute("UPDATE state SET data=? WHERE key=?", (json.dumps(decision), key))
+            journal.db.commit()
+            journal.emit("fork.native_started" if phase == "pre" else "fork.native_returned", id=decision["id"],
+                         choice=decision["selected"], actor=decision["actor"], tool=tool, call_id=call_id, status=decision["status"])
+            return decision["id"]
+        journal.db.commit()
+        return None
+    except Exception:
+        journal.db.rollback()
+        raise
+
+
+def failure(journal, key, source="agent_report"):
     key = hashlib.sha256(key.encode()).hexdigest()[:20]
     value = journal.get("failure:" + key, {"count": 0, "retries": 0})
     value["count"] += 1
     journal.put("failure:" + key, value)
-    journal.emit("failure.observed", key=key, count=value["count"], source="agent_report")
+    journal.emit("failure.observed", key=key, count=value["count"], source=source)
     result = {"failure_key": key, **value}
     if value["count"] > 1:
         # Every recurrence needs fresh advice, not a review from an earlier recurrence.
@@ -216,7 +282,7 @@ def finish(journal):
     repeated = journal.get("checkpoint:error_repeats")
     if repeated and repeated["status"] != "completed":
         missing.append("error_repeats")
-    pending = [key for key, data in journal.db.execute("SELECT key,data FROM state WHERE key LIKE 'decision:%'") if json.loads(data)["status"] in ("pending", "executing", "failed")]
+    pending = [key for key, data in journal.db.execute("SELECT key,data FROM state WHERE key LIKE 'decision:%'") if json.loads(data)["status"] not in ("completed", "cancelled")]
     passed = not missing and not pending
     journal.emit("workflow.audit", passed=passed, missing=missing, unresolved=pending)
     return {"passed": passed, "missing": missing, "unresolved": pending}
@@ -226,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tầng quyết định Jev và checkpoint Agent Tree")
     parser.add_argument("--run-id")
     commands = parser.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("fork"); p.add_argument("--input", default="-", help="JSON trên stdin hoặc đường dẫn file")
+    p = commands.add_parser("fork"); p.add_argument("--input", default="-", help="JSON trên stdin hoặc đường dẫn file"); p.add_argument("--json", help="JSON inline để gọi controller trong native hooks")
     p = commands.add_parser("resolve"); p.add_argument("decision_id"); p.add_argument("choice")
     p = commands.add_parser("checkpoint"); p.add_argument("name", choices=("before_plan", "error_repeats", "before_done")); p.add_argument("--agent-id")
     p = commands.add_parser("failure"); p.add_argument("fingerprint")
@@ -237,7 +303,7 @@ def main():
     try:
         journal = Journal(run_id=args.run_id)
         if args.command == "fork":
-            value = fork(journal, json.load(sys.stdin) if args.input == "-" else json.loads(Path(args.input).read_text()))
+            value = fork(journal, json.loads(args.json) if args.json is not None else (json.load(sys.stdin) if args.input == "-" else json.loads(Path(args.input).read_text())))
         elif args.command == "resolve":
             value = dispatch(journal, args.decision_id, args.choice, "sol")
         elif args.command == "checkpoint":

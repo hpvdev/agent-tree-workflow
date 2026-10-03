@@ -1,159 +1,162 @@
 # Agent Tree Workflow
 
-Workflow Codex cài riêng cho từng project, triển khai các tầng trong mô hình tham chiếu: **Sol điều phối → Jev xử lý điểm rẽ → các agent chuyên trách → Sol xác minh**, với **Astra tư vấn ở ba mốc** và bảng theo dõi dữ liệu thực.
+Bộ workflow Codex cài riêng cho từng project: **Sol lập kế hoạch/viết code → Jev chọn nhánh → tool hoặc agent thực thi → Sol tích hợp/xác minh**. Astra tư vấn trước kế hoạch, khi lỗi lặp lại và trước hoàn tất. Dashboard hiển thị sự kiện thực, không tạo số liệu minh họa.
 
-Không chỉnh cấu hình toàn cục. Không tự cài vào project khi chỉ clone repo. Python 3.9+, thư viện chuẩn; cần Codex CLI đã đăng nhập và `jev` đã cấu hình xác thực. Jev thiếu hoặc lỗi sẽ chuyển quyết định về Sol và ghi rõ fallback.
+Python 3.9+, thư viện chuẩn, Codex có native subagents/hooks và Jev CLI đã xác thực. Chỉ clone repo chưa cài vào project nào. Bộ cài không sửa cấu hình toàn cục.
 
-## Cài và chạy
+## Cài vào project
 
 ```sh
 git clone https://github.com/hpvdev/agent-tree-workflow.git ~/Documents/Agent-Tree-Workflow
 python3 ~/Documents/Agent-Tree-Workflow/install.py install --project /path/to/project
+```
+
+Thay `/path/to/project` bằng thư mục project có sẵn. Nếu đã clone thì dùng thư mục hiện có.
+
+1. Mở đúng project trong Codex và dùng `/hooks` để xem, chấp thuận các hook Agent Tree theo cơ chế trust của Codex. Hook chưa được trust chưa chạy. Nếu client không có giao diện `/hooks`, dùng Codex CLI hỗ trợ hooks trong project đó để review; không tự chỉnh kho trust bằng script.
+2. Bắt đầu phiên mới và gửi yêu cầu. Hook cung cấp RUN_ID riêng cho mỗi lượt; agent làm theo khối workflow đã cài trong `AGENTS.md`.
+3. Chọn main model Sol/high trong Codex app. `settings.json` không tự đổi model đang chọn trong app. Cấu hình role xác định model của các agent con; giới hạn runtime và chính sách quản trị vẫn được ưu tiên.
+4. Mở dashboard riêng để theo dõi phiên. Không cần mở CLI lồng trong agent.
+
+Bộ cài thêm `.agent-tree/`, `.codex/agents/agent_tree_*.toml`, khối có dấu mốc trong `AGENTS.md`, và **gộp** hook của nó vào `.codex/hooks.json`. Giữ nguyên hook/cấu hình project có sẵn. Refuse file trùng, file đã sửa ngoài bộ cài và symbolic link.
+
+Launcher tùy chọn áp dụng main model/effort, giới hạn agent và approval mode đã cấu hình:
+
+```sh
 cd /path/to/project
 python3 .agent-tree/run.py --watch "Yêu cầu phát triển của bạn"
 ```
 
-Thay `/path/to/project` bằng project đã tồn tại. Nếu đã clone thì dùng thư mục hiện có. `--watch` có thể bỏ qua: bản v2 luôn chạy launcher có theo dõi/audit. Không tự mở phiên tương tác khi thiếu yêu cầu.
+Launcher và hooks dùng chung journal. Nếu hooks chưa hoạt động, launcher vẫn quan sát CLI/agent bằng adapter, nhưng **không xác nhận được native action đã được Jev chọn**; audit giữ phần đó chưa hoàn tất. Không coi launcher là cách bỏ qua trust.
 
-Bộ cài thêm một khối đánh dấu vào `AGENTS.md`, vai trò vào `.codex/agents/agent_tree_*.toml`, và chương trình vào `.agent-tree/`. Không ghi đè cấu hình Codex của project, file trùng tên hoặc symbolic link. Repo cần được Codex tin cậy theo cơ chế của Codex; quyền quản trị và chỉ dẫn ưu tiên cao hơn vẫn áp dụng.
-
-## Cơ chế hoạt động
+## Mô hình và vai trò
 
 ```text
-                 Astra · on call · chỉ tư vấn
-                  ↑       ↑          ↑
-             before_plan lỗi lặp   before_done
-                  │       │          │
-Sol/high ──► kế hoạch ──► Jev fork layer
-                           ├─ sharp ─► Python thực hiện nhánh đã khai báo
-                           └─ split ─► Sol quyết định ─► Python thực hiện
-                                          │
-                          worker / explorer / researcher
-                                          │
-                               Sol review + kiểm tra
-                                          │
-                               Astra before_done
-                                          │
-                               kiểm toán workflow
+Astra before_plan ─► Sol/high: lập kế hoạch, viết code
+                          │
+                     JEV FORK LAYER
+                   file / tool / agent / retry
+                     ├─ sharp ─► code dispatch
+                     └─ split ─► Sol resolve ─► code dispatch
+                                           │
+                           tool native hoặc agent phù hợp
+                           worker / explorer / researcher
+                                           │
+                                  Sol tích hợp + kiểm tra
+                                           │
+                                  Astra before_done
+                                           │
+                                  Sol hoàn tất + audit
+
+Lỗi lặp lại ─► Astra error_repeats ─► Sol áp dụng nhận xét
+Quyền thực thi ─► cơ chế approval native của Codex
 ```
 
-| Vai trò | Mặc định | Công việc |
+| Vai trò | Model mặc định | Trách nhiệm |
 |---|---|---|
-| Main | GPT-6 Sol / high | Kế hoạch, phân công, tích hợp, review, xác minh |
-| Worker | GPT-6 Sol / medium | Sửa code và chạy kiểm tra được giao |
-| Explorer | GPT-6 Luna / medium | Đọc code, tìm file/callsite |
-| Researcher | GPT-6 Luna / medium | Tra tài liệu chính thức |
-| Astra | GPT-6 Astra / medium | Tư vấn trước plan, khi lỗi lặp, trước hoàn tất; không viết code |
-| Jev | jev-latest | Trả lựa chọn có kiểu và phân phối xác suất |
+| Main | gpt-6-sol / high | Kế hoạch, code, phân công, tích hợp, xác minh |
+| Worker | gpt-6-sol / medium | Sửa code và chạy kiểm tra được giao |
+| Explorer | gpt-6-luna / medium | Đọc code, tìm file/callsite |
+| Researcher | gpt-6-luna / medium | Đọc tài liệu chính thức |
+| Astra | gpt-6-astra / medium | Chỉ tư vấn ở ba mốc; không viết code |
+| Jev | jev-latest | Chọn nhánh hữu hạn, trả phân phối xác suất |
 
-Model chỉ là mặc định có thể đổi. Ảnh dùng GPT-6.1 Sol; bộ cài không tự giả định tài khoản có model đó. Chọn ID bạn được phép dùng. Tối đa sáu agent phụ đồng thời, tuân thủ giới hạn thấp hơn của runtime. Agent con không tự phân công tiếp.
+Ảnh ghi GPT-6.1 Sol; mặc định dùng ID đã cấu hình được ở môi trường triển khai, không giả định mọi tài khoản có cùng model. Tất cả ID/effort đều đổi được. Mặc định tối đa sáu agent con, hoặc giới hạn thấp hơn của runtime. Không bắt buộc tạo đủ ba loại agent cho mọi task. Agent con thực hiện phần được giao, không tự phân công đệ quy.
 
-**Đây là native subagents của Codex**, không phải nhiều CLI giả vai trò. Sol thực hiện các bước theo chỉ dẫn; controller kiểm tra các điểm rẽ và điều kiện hoàn tất. Controller không chặn mọi lời gọi tool của Sol: audit thất bại phát hiện bước thiếu, không hoàn tác code đã sửa. Quyền thực thi vẫn thuộc Codex, không thuộc xác suất Jev.
+## Jev là tầng quyết định
 
-## Jev thực thi như thế nào?
+Sol chuẩn bị state ngắn và các lựa chọn thực sự có thể thực hiện. Controller gọi `jev ask` thật với câu hỏi Choice. Chỉ state, question và mô tả lựa chọn được gửi tới Jev; không tự upload file, prompt agent, lệnh shell hay toàn bộ hội thoại.
 
-Tầng `control.py fork` nhận một câu hỏi hẹp, state không nhạy cảm và danh sách lựa chọn hữu hạn. Nó gọi **Jev CLI thật**, kiểm tra phân phối rồi phân nhánh:
+- `which_file`: chọn file cần đọc.
+- `which_tool`: chọn thao tác đọc/tìm hoặc tool native cần gọi.
+- `which_agent`: chọn worker/explorer/researcher theo công việc; đây là phần mở rộng được người dùng yêu cầu bên cạnh ba dòng fork trong ảnh.
+- `retry_or_stop`: chọn thử lại hoặc dừng nhánh, có failure key và giới hạn retry bằng code.
 
-- **Sharp:** lựa chọn không phải fallback, confidence ≥ 0.85, xác suất lựa chọn ≥ 0.85 và chênh lệch với lựa chọn thứ hai ≥ 0.20. Python chạy action tương ứng ngay, ghi sự kiện và trả kết quả.
-- **Split:** Sol nhận quyết định chưa rõ, xác suất gốc nếu có và ID quyết định. Chưa có action nào chạy. Sol dùng bằng chứng để `resolve ID CHOICE`, hoặc `resolve ID stop`.
-- **Lỗi Jev:** thiếu CLI/xác thực, timeout hoặc đầu ra sai → split về Sol; không tạo confidence giả.
+**Sharp:** controller dùng lựa chọn của Jev để dispatch. Đọc/tìm kiếm nội bộ chạy ngay. Với tool/agent native, controller trả lời gọi chính xác, Sol chuyển lời gọi đó sang runtime; hook đối chiếu tool và input trước khi ghi nhận kết quả. Sol không quyết định lại nhánh sharp.
 
-Các ngưỡng trên là **chính sách kỹ thuật ban đầu**, không phải số được suy ra từ ảnh hoặc bảo đảm độ đúng. Có thể điều chỉnh theo dữ liệu thật. Không đồng nhất `confidence` với xác suất lựa chọn; nhật ký giữ cả hai.
+**Split:** không thực thi action. Sol đánh giá bằng chứng rồi `resolve ID CHOICE` hoặc `resolve ID stop`. Lỗi Jev/timeout/schema sai cũng về Sol và ghi rõ nguyên nhân, không tạo xác suất giả.
 
-Ba loại fork: `which_file`, `which_tool`, `retry_or_stop`. Action tự động hiện gồm **đọc file, tìm chuỗi trong file và dừng nhánh hiện tại**. Chúng có giới hạn kích thước và chỉ đọc trong project. Retry lặp lại một action đọc/tìm đã khai báo, mặc định tối đa một lần cho cùng failure key; lỗi tái diễn cần checkpoint Astra mới. Edits, shell, tests và network vẫn qua native tools/approval của Codex. Không có cơ chế cho Jev tự phê duyệt một lệnh shell bất kỳ.
+Ngưỡng ban đầu: confidence ≥ 0.85, xác suất lựa chọn ≥ 0.85, chênh lệch hai lựa chọn đầu ≥ 0.20. Đây là cấu hình kỹ thuật cần hiệu chỉnh theo dữ liệu, không phải hằng số lấy từ ảnh hay bảo đảm đúng. Known facts, việc đã được quyết định và điều phối chờ agent không cần tạo câu hỏi Jev giả.
 
-Chỉ state, question và mô tả lựa chọn được gửi ra Jev. Code không tự tải nội dung file lên Jev. Paths/action giữ cục bộ, trừ khi người tạo câu hỏi đưa chúng vào mô tả. Agent phải kiểm tra dữ liệu không nhạy cảm trước khi đặt `non_sensitive=true`; đây là xác nhận của caller, không phải bộ phát hiện bí mật tự động.
+### Nối lựa chọn với thực thi
 
-Định dạng input và các lệnh controller được cài trực tiếp vào khối workflow trong `AGENTS.md`. Không cần tự nhập lệnh fork trong sử dụng thông thường: Sol gọi controller tại các điểm rẽ phù hợp. Không ép Jev xử lý mọi sự kiện xác định hoặc bịa câu hỏi để tăng số fork.
+Native action đi qua các trạng thái:
 
-## Astra và điều kiện hoàn tất
+```text
+pending → awaiting_native → native_running → completed hoặc native_failed
+```
 
-Controller ghi checkpoint pending; Sol tạo **một Astra mới** cho mốc đó, đợi phản hồi và đưa ID thật để hoàn tất. Observer đối chiếu role, model và trạng thái đã hoàn tất của agent mới sau checkpoint. Không chấp nhận agent giả, sai model, còn chạy hoặc lấy lại review cũ.
+Hook chặn tool không khớp khi quyết định còn chờ, và yêu cầu một nhánh `which_agent` trước khi spawn worker/explorer/researcher. Checkpoint Astra, lệnh controller và thao tác chờ vẫn dùng được. Chỉ `PostToolUse` khớp lời gọi đã quan sát mới hoàn tất native action; không có lệnh để Sol tự khai đã chạy. `completed` chứng minh tool đã trả về, không chứng minh code đúng. Test và review vẫn cần thiết.
 
-- `before_plan`: bắt buộc trước lập kế hoạch.
-- `error_repeats`: khi cùng failure fingerprint được báo lại, không phải sau một số cách sửa tùy ý. Việc nhận diện lỗi và gọi `failure` do Sol thực hiện, nhật ký ghi rõ nguồn `agent_report`.
-- `before_done`: bắt buộc sau triển khai/xác minh. Nếu sửa code liên quan sau review, Sol cần review mới.
+Input phải đúng tên/shape canonical của runtime: shell hook Codex dùng `Bash` và `input.command`; MCP dùng tên và arguments native. Nếu host không phát hook cho loại tool đó, action còn treo và phải báo giới hạn. Controller Python không có quyền trực tiếp điều khiển tool bên trong phiên Codex; native dispatch vẫn cần lượt gọi tool của main. Vì thế chưa thể khẳng định loại bỏ mọi lượt model hay đạt tốc độ/chi phí trong ảnh.
 
-Cuối phiên, code kiểm tra checkpoint và quyết định còn treo. Codex kết thúc lượt thành công nhưng thiếu bước thì launcher trả **exit 2**, không tuyên bố workflow đạt. Việc phát hiện chất lượng review hay tính đúng đắn của code vẫn cần Sol/Astra và test; metadata chỉ chứng minh lời gọi có xảy ra và hoàn tất.
+Workflow này không chặn mọi tool xác định trước, không phải sandbox bảo mật và không thể tự chứng minh agent đã khai báo mọi điểm rẽ ngữ nghĩa. AGENTS quy định điểm nào phải qua Jev; code kiểm tra quyết định đã đăng ký và bằng chứng thực thi. Native approvals vẫn quyết định quyền thực thi, xác suất Jev không cấp quyền.
 
-## Auto review cho quyền thực thi
+Ví dụ input/lệnh được cài trong `AGENTS.md`. Dùng `fork --json 'JSON'` với shell quoting chuẩn, lệnh đứng riêng ở project root, để controller có thể xử lý quyết định còn chờ. Args và options lưu cục bộ trong journal; không ghi secrets vào chúng. `non_sensitive=true` là xác nhận của caller, không phải bộ dò bí mật tự động. Nếu không thể mô tả bằng dữ kiện không nhạy cảm, không gửi ra Jev.
 
-Mặc định launcher truyền `--approve-for-me` cho Codex: dùng sandbox workspace-write và cơ chế xét duyệt tự động native. Đây là tầng kiểm tra quyền tool, tách biệt với review code của Astra và audit workflow. Chương trình không tự cấp quyền, không bỏ qua sandbox, không tự trả lời thay bộ xét duyệt. Thao tác bị từ chối vẫn phải xử lý theo kết quả của Codex.
+## Astra và audit
 
-Có thể dùng lại quyền hiện có của Codex cho project này bằng:
+`before_plan` và `before_done` bắt buộc trong workflow này; `error_repeats` khi lỗi tái diễn. Astra không chạy trên mọi tool call. Controller đối chiếu agent mới, role/model, thời điểm tạo và trạng thái hoàn tất; metadata không đánh giá chất lượng nhận xét.
+
+Hooks tự ghi lỗi khi tool response có `isError` hoặc exit code khác 0. Lỗi khác cần Sol báo qua `failure`; không đếm lại một lần lỗi đã ghi. Failure fingerprint tự động dựa trên tool/input giống nhau; nhận ra cùng nguyên nhân qua các lệnh khác nhau vẫn cần Sol. Mỗi lần tái diễn cần Astra mới trước tiếp tục. Retry mặc định tối đa một lần cho cùng failure key.
+
+Fork mới sau review cuối làm hết hiệu lực `before_done`. Sol cũng phải yêu cầu review lại nếu thay đổi liên quan phát sinh ngoài fork. Stop hook nhắc hoàn tất một lần; nếu vẫn thiếu, báo audit chưa đạt, không tạo vòng lặp vô hạn hoặc tự đánh dấu đạt. Launcher trả exit 2 khi CLI thành công nhưng workflow chưa đủ.
+
+`--approve-for-me` chỉ áp dụng khi chạy launcher với `approval_mode=auto-review`. Phiên mở trực tiếp trong app dùng quyền native đã chọn; hook không tự bật hoặc phê duyệt thay Codex.
+
+## Luôn xem hoạt động của phiên
 
 ```sh
-python3 .agent-tree/install.py configure --project . --approval-mode inherit
+cd /path/to/project
+python3 .agent-tree/watch.py --list
+python3 .agent-tree/watch.py --session SESSION_ID
 ```
 
-Đặt lại `--approval-mode auto-review` để theo mô hình. Chính sách quản trị hoặc runtime cao hơn vẫn được ưu tiên.
+Dashboard đọc journal, không gọi model, không mở phiên làm việc mới. Nó theo dõi các lượt mới của cùng session: Jev sharp/split và lựa chọn, tool đang chạy/đã trả về, agent/role/model, checkpoint Astra. Ctrl+C chỉ đóng dashboard. Dữ liệu host chưa cung cấp, như token ở hook mode, hiển thị chưa có dữ liệu.
 
-## Xem luồng chạy
+Log cục bộ trong `.agent-tree/logs/RUN_ID/events.sqlite3`; index phiên ở `logs/sessions/`. Hook log không giữ raw prompt/tool output. Launcher còn lưu `codex.jsonl`, `timeline.jsonl`, `stderr.log` có thể chứa nội dung task; không chia sẻ nếu chưa kiểm tra. Logs được bỏ qua khi commit Git và giữ lại khi gỡ.
 
-Terminal tương tác hiển thị:
-
-- Main, cây vai trò agent, model thực tế và trạng thái đọc từ metadata.
-- Số fork Jev, sharp/split, xác suất và confidence thật.
-- Các checkpoint Astra, số lần gọi và input tokens quan sát được.
-- Nhật ký các bước gần nhất, lệnh, file, kết quả kiểm tra.
-
-`codex exec --json` cung cấp hoạt động main. Adapter bổ sung metadata từ rollout cục bộ **chỉ của root session này và hậu duệ**, không giải mã nội dung mã hóa. Định dạng rollout là chi tiết nội bộ có thể đổi theo Codex; nếu không quan sát được thì không xác nhận checkpoint và workflow báo thiếu dữ kiện. Đây không phải giao diện tự vẽ trạng thái giả hay một widget cài vào Codex app.
-
-Log mỗi lượt nằm trong `.agent-tree/logs/RUN_ID/`:
-
-| File | Nội dung |
-|---|---|
-| `codex.jsonl` | Stream gốc từ CLI |
-| `timeline.jsonl` | Stream CLI và sự kiện Jev/agent/checkpoint theo thứ tự quan sát |
-| `events.sqlite3` | Nhật ký quyết định, checkpoint và metadata |
-| `stderr.log` | Chẩn đoán CLI |
-
-Xem lại (không gọi model):
+Xem lại log launcher:
 
 ```sh
 python3 .agent-tree/run.py --replay .agent-tree/logs/RUN_ID
 ```
 
-Khi redirect stdout thì in nhật ký từng dòng, không xóa màn hình. Ctrl+C dừng CLI đã mở; Codex có thể quản lý agent độc lập nên kiểm tra subagents nếu cần dừng toàn bộ. Log được loại khỏi Git và giữ lại khi gỡ. Không hiển thị chuỗi suy nghĩ riêng tư, không bịa token/giá. Input tokens là số Codex báo, không phải số byte file đã đọc hay chi phí thanh toán.
+Đây là dashboard terminal, không phải widget bên trong Codex app. Không hiển thị suy nghĩ riêng tư hoặc tạo số liệu token/giá giả.
 
-Nếu mở trực tiếp bằng Codex app, chỉ dẫn/role project vẫn có thể được nạp nhưng controller đầy đủ cần launcher. Không tự mở CLI lồng trong agent để che giấu sự thiếu khả năng.
-
-## Đổi model và ngưỡng
+## Đổi model, cập nhật và gỡ
 
 ```sh
 python3 .agent-tree/install.py show --project .
 python3 .agent-tree/install.py configure --project . --main-model MODEL_ID --main-effort high
 python3 .agent-tree/install.py configure --project . --worker-model MODEL_ID --worker-effort medium
 python3 .agent-tree/install.py configure --project . --explorer-model MODEL_ID --researcher-model MODEL_ID
-python3 .agent-tree/install.py configure --project . --astra-model MODEL_ID
+python3 .agent-tree/install.py configure --project . --astra-model MODEL_ID --astra-effort high
 python3 .agent-tree/install.py configure --project . --jev-model jev-latest
 python3 .agent-tree/install.py configure --project . --jev-confidence 0.90 --jev-probability 0.90 --jev-margin 0.25
 python3 .agent-tree/install.py configure --project . --max-agents 4
+python3 .agent-tree/install.py configure --project . --approval-mode inherit
 ```
 
-Model ID không bị khóa vào danh sách cứng. Effort phải được model hỗ trợ. Dùng `codex debug models` nếu CLI hỗ trợ để xem model tài khoản; `jev models` cho Jev. Thay đổi áp dụng từ lần chạy tiếp theo, không tự đổi model khi lỗi. Dùng `configure` để đồng bộ settings, role files và manifest, không sửa tay các file được quản lý.
-
-## Cập nhật và gỡ
+Model/effort phải được tài khoản hỗ trợ. Dùng `configure` để đồng bộ settings, role files và manifest. Áp dụng từ lần chạy tiếp theo; main model trong app vẫn chọn trong app.
 
 ```sh
 git -C ~/Documents/Agent-Tree-Workflow pull --ff-only
 python3 ~/Documents/Agent-Tree-Workflow/install.py upgrade --project /path/to/project
-```
-
-Upgrade giữ lựa chọn model/effort/ngưỡng và log cũ. Dừng các lượt đang chạy trước khi upgrade. File đã bị sửa ngoài bộ cài thì lệnh dừng để tránh ghi đè.
-
-```sh
+# Gỡ tại project:
 python3 .agent-tree/install.py uninstall --project .
 ```
 
-Gỡ đúng khối workflow và các file quản lý; giữ nội dung khác của AGENTS.md và log. Cấu hình toàn cục và project khác không đổi.
+Dừng các lượt đang chạy trước khi upgrade. Upgrade giữ model/ngưỡng/log; thay đổi định nghĩa hook có thể cần review/trust lại. Gỡ chỉ xóa khối/file/hook thuộc bộ cài, giữ các hook và nội dung khác của project.
 
-## Kiểm chứng
+## Kiểm chứng và nguồn tham khảo
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Tests kiểm tra cài/gỡ, chọn model, sharp/split, lỗi Jev, retry budget, ranh giới project, chống chạy lặp action và chứng cứ Astra. Không gọi API trong unit tests. Smoke test thực dùng project riêng và tiêu thụ hạn mức Codex/Jev.
+Tests kiểm tra sharp/split, native routing và chống đánh dấu thực thi giả, chọn agent, lỗi lặp, checkpoint, tách lượt/session, cài/gỡ/upgrade và giữ hook có sẵn. Fixtures mô phỏng sự kiện để kiểm tra contract, không phải chứng cứ một client cụ thể đã bật hooks. Muốn xác nhận cài đặt live, cần trust hooks và quan sát một phiên native thực trong project test.
 
-Tham chiếu: [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents), [CLI events](https://learn.chatgpt.com/docs/non-interactive-mode), [lưu ý định dạng transcript](https://learn.chatgpt.com/docs/hooks), [TypeSafe Choice](https://docs.typesafe.ai/primitives/choice), [confidence](https://docs.typesafe.ai/confidence), [function dispatch](https://docs.typesafe.ai/cookbooks/function_calling).
+Nguồn chính: [TypeSafe Choice](https://docs.typesafe.ai/primitives/choice), [function calling](https://docs.typesafe.ai/cookbooks/function_calling), [Codex hooks/trust](https://learn.chatgpt.com/docs/hooks), [native subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+
+Tham khảo cộng đồng: [jev-codex-router](https://github.com/0xNatoshi/jev-codex-router) chọn model/effort mỗi lời gọi. Bộ này giữ vai trò Sol/Astra theo ảnh và tập trung chọn hành động; không cài proxy đó hoặc lấy số tiết kiệm của nó làm kết quả của workflow này. Chưa xác minh được bài gốc trực tiếp của @Bober_smart trên X; ảnh người dùng cung cấp là nguồn yêu cầu bố cục/vai trò.

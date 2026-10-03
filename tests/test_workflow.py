@@ -101,6 +101,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((logs / "keep.jsonl").read_text(), "keep this log\n")
         self.assertEqual((self.root / "AGENTS.md").read_text().count("<!-- agent-tree:start -->"), 1)
 
+    def test_hooks_merge_preserves_existing_and_later_user_hooks(self):
+        (self.root / ".codex").mkdir()
+        path = self.root / ".codex/hooks.json"
+        existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo original"}]}]}}
+        original = json.dumps(existing)
+        path.write_text(original)
+        self.cli("install")
+        self.assertEqual(len(json.loads(path.read_text())["hooks"]["Stop"]), 2)
+        self.cli("uninstall")
+        self.assertEqual(path.read_text(), original)
+        self.cli("install")
+        value = json.loads(path.read_text())
+        added = {"hooks": [{"type": "command", "command": "echo later"}]}
+        value["hooks"]["Stop"].append(added)
+        path.write_text(json.dumps(value))
+        self.cli("upgrade")
+        self.cli("uninstall")
+        self.assertEqual(json.loads(path.read_text())["hooks"]["Stop"], existing["hooks"]["Stop"] + [added])
+
     def test_event_monitor_reports_real_states_and_failure(self):
         view = monitor.Monitor()
         with contextlib.redirect_stdout(io.StringIO()) as output:

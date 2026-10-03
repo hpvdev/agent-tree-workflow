@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import shlex
 
 START = "<!-- agent-tree:start -->"
 END = "<!-- agent-tree:end -->"
@@ -15,6 +16,50 @@ DEFAULT_MODELS = {"main": "gpt-6-sol", "worker": "gpt-6-sol", "explorer": "gpt-6
                   "researcher": "gpt-6-luna", "astra": "gpt-6-astra"}
 JEV_DEFAULTS = {"command": "jev", "model": "jev-latest", "confidence": .85,
                 "probability": .85, "margin": .20, "timeout_ms": 15000, "max_retries": 1}
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "SubagentStart", "SubagentStop", "Stop", "Interrupt", "SessionEnd")
+
+
+def hook_changes(root):
+    path = local_path(root, ".codex/hooks.json")
+    original = path.read_text() if path.exists() else None
+    value = json.loads(original) if original is not None else {}
+    hooks = value.setdefault("hooks", {})
+    bootstrap = 'import pathlib,runpy,sys; p=next(p for p in [pathlib.Path.cwd(),*pathlib.Path.cwd().parents] if (p/".agent-tree/hooks.py").is_file()); sys.path.insert(0,str(p/".agent-tree")); runpy.run_path(str(p/".agent-tree/hooks.py"),run_name="__main__")'
+    group = {"hooks": [{"type": "command", "command": "python3 -c " + shlex.quote(bootstrap), "timeout": 3, "statusMessage": "Agent Tree lifecycle v3"}]}
+    added = {}
+    for event in HOOK_EVENTS:
+        groups = hooks.setdefault(event, [])
+        if group in groups:
+            raise ValueError("Đã có hook Agent Tree chưa được quản lý; kiểm tra bản cài trước.")
+        groups.append(group)
+        added[event] = group
+    return original, added, (json.dumps(value, indent=2) + "\n").encode()
+
+
+def remove_hooks(root, manifest):
+    if not manifest.get("hook_groups"):
+        return
+    path = local_path(root, ".codex/hooks.json")
+    value = json.loads(path.read_text())
+    for event, group in manifest["hook_groups"].items():
+        value["hooks"][event].remove(group)
+        if not value["hooks"][event]:
+            del value["hooks"][event]
+    if not value["hooks"]:
+        del value["hooks"]
+    original = manifest.get("hooks_original")
+    original_value = json.loads(original) if original is not None else {}
+    # Preserve original empty structures and formatting if there are no later additions.
+    normalized = dict(original_value)
+    if normalized.get("hooks") == {}:
+        normalized.pop("hooks")
+    if value == normalized:
+        if original is None:
+            path.unlink()
+        else:
+            path.write_text(original)
+    else:
+        path.write_text(json.dumps(value, indent=2) + "\n")
 
 
 def digest(data):
@@ -36,6 +81,11 @@ def local_path(root, relative):
 def checked_manifest(root):
     path = local_path(root, ".agent-tree/manifest.json")
     manifest = json.loads(path.read_text())
+    if manifest.get("hook_groups"):
+        hooks = json.loads(local_path(root, ".codex/hooks.json").read_text()).get("hooks", {})
+        for event, group in manifest["hook_groups"].items():
+            if hooks.get(event, []).count(group) != 1:
+                raise ValueError("Hook Agent Tree đã thay đổi; không tự ghi đè: " + event)
     for name, expected in manifest["files"].items():
         file = local_path(root, name)
         if not file.is_file() or digest(file.read_bytes()) != expected:
@@ -84,7 +134,7 @@ def install(root, args):
         ".agent-tree/install.py": Path(__file__).read_bytes(),
         ".agent-tree/settings.json": (json.dumps(settings, indent=2) + "\n").encode(),
     }
-    for name in ("runtime.py", "observer.py", "control.py"):
+    for name in ("runtime.py", "observer.py", "control.py", "hooks.py", "watch.py"):
         files[".agent-tree/" + name] = (SOURCE / "templates" / name).read_bytes()
     for role in ROLES:
         relative = ".codex/agents/agent_tree_" + role + ".toml"
@@ -95,7 +145,9 @@ def install(root, args):
     for name in files:
         if local_path(root, name).exists():
             raise ValueError("Không ghi đè file có sẵn: " + name)
-    manifest = {"version": 2, "agents_existed": agents.exists(), "block": block,
+    hooks_original, hook_groups, hook_bytes = hook_changes(root)
+    manifest = {"version": 3, "agents_existed": agents.exists(), "block": block,
+                "hooks_original": hooks_original, "hook_groups": hook_groups,
                 "files": {name: digest(data) for name, data in files.items()}}
     created = []
     made_dirs = []
@@ -110,8 +162,15 @@ def install(root, args):
                 file.write(data)
             created.append(target)
         agents.write_bytes(original + block.encode())
+        local_path(root, ".codex/hooks.json").write_bytes(hook_bytes)
         (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     except Exception:
+        hook_path = local_path(root, ".codex/hooks.json")
+        if hook_path.exists() and hook_path.read_bytes() == hook_bytes:
+            if hooks_original is None:
+                hook_path.unlink()
+            else:
+                hook_path.write_text(hooks_original)
         if agents.exists() and agents.read_bytes() == original + block.encode():
             if manifest["agents_existed"]:
                 agents.write_bytes(original)
@@ -124,7 +183,8 @@ def install(root, args):
                 directory.rmdir()
         raise
     print("Đã cài workflow vào: " + str(root))
-    print("Chạy: python3 " + str(package / "run.py"))
+    print("Kích hoạt trong Codex: mở /hooks, review và trust hooks Agent Tree. Chưa trust thì hooks chưa chạy.")
+    print("Xem phiên: python3 " + str(package / "watch.py") + " --list")
 
 
 def configure(root, args):
@@ -180,6 +240,7 @@ def uninstall(root):
         print("Project chưa cài Agent Tree.")
         return
     manifest = checked_manifest(root)
+    remove_hooks(root, manifest)
     agents = local_path(root, "AGENTS.md")
     remaining = agents.read_bytes().replace(manifest["block"].encode(), b"", 1)
     if remaining or manifest["agents_existed"]:
@@ -235,7 +296,7 @@ def main():
                 elif getattr(args, key, None) is None:
                     setattr(args, key, value)
             # Validate sources before removing the old installation.
-            for name in ("run.py", "monitor.py", "runtime.py", "observer.py", "control.py", "workflow.md"):
+            for name in ("run.py", "monitor.py", "runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "workflow.md"):
                 (SOURCE / "templates" / name).read_bytes()
             uninstall(root)
             install(root, args)
