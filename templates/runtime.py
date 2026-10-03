@@ -15,7 +15,7 @@ class Journal:
         self.root = Path(root).resolve()
         self.run_id = run_id or os.environ.get("AGENT_TREE_RUN")
         if not self.run_id or not re.fullmatch(r"[A-Za-z0-9_-]+", self.run_id):
-            raise ValueError("Hãy chạy qua run.py hoặc cung cấp --run-id hợp lệ.")
+            raise ValueError("Hãy gọi begin từ skill rồi dùng --run-id hợp lệ.")
         directory = self.root / ".agent-tree/logs" / self.run_id
         for path in (directory.parent, directory, directory / "events.sqlite3"):
             if path.is_symlink():

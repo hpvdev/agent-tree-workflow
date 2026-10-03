@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Tree"
+  short_description: "Điều phối Sol, Jev và agent theo yêu cầu"
+  default_prompt: "Dùng $agent-tree để xử lý yêu cầu này trong project."
+policy:
+  allow_implicit_invocation: false

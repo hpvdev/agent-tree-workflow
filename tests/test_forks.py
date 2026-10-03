@@ -13,7 +13,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "templates"))
 from runtime import Journal
 from observer import Observer
-from control import classify, fork, dispatch, failure, request_checkpoint, complete_checkpoint, finish, native_event
+from control import classify, fork, dispatch, failure, request_checkpoint, complete_checkpoint, finish, native_event, confirm_agent, finalize_retro
 from hooks import handle, routing_guard, controller_call
 from install import JEV_DEFAULTS
 
@@ -24,12 +24,14 @@ class ForkTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         (self.root / ".agent-tree").mkdir()
-        (self.root / ".agent-tree/settings.json").write_text(json.dumps({"jev": JEV_DEFAULTS, "astra_model": "gpt-6-astra"}))
+        (self.root / ".agent-tree/settings.json").write_text(json.dumps({"jev": JEV_DEFAULTS, "astra_model": "gpt-6-astra",
+                                                                  "worker_model": "gpt-6-sol"}))
         (self.root / "impl.py").write_text("def example(): return 1\n")
         (self.root / "README.md").write_text("Introduction\n")
         self.journal = Journal(self.root, "test")
         self.addCleanup(self.journal.close)
         self.journal.put("checkpoint:before_plan", {"status": "completed"})
+        self.journal.put("agent_route", {"role": "main", "actor": "jev"})
         self.request = {"kind": "which_file", "state": "Find the implementation", "question": "Which candidate implements the behavior?",
                         "non_sensitive": True, "options": {
                             "impl": {"description": "implementation", "action": {"type": "read_file", "path": "impl.py"}},
@@ -132,21 +134,78 @@ class ForkTests(unittest.TestCase):
         self.assertIsNone(native_event(self.journal, "Bash", result["call"]["input"], "call-2", "pre"))
         self.assertEqual(finish(self.journal)["unresolved"], [])
 
-    def test_agent_selection_split_and_cancellation(self):
+    def test_jev_must_select_first_agent_even_when_confidence_is_low(self):
+        self.journal.put("agent_route", None)
         request = {**self.request, "kind": "which_agent", "options": {
-            role: {"description": role, "action": {"type": "spawn_agent", "role": role, "tool": "spawn_agent",
-                    "input": {"agent_type": "agent_tree_" + role, "message": "A public example task"}}}
-            for role in ("worker", "explorer", "researcher")}}
-        denied = routing_guard(self.journal, "spawn_agent", request["options"]["worker"]["action"]["input"], "spawn")
-        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
-        with patch("control.subprocess.run", return_value=self.response({"worker": .4, "explorer": .3, "researcher": .2, "sol": .1}, .2)):
+            "main": {"description": "Sol implements directly", "action": {"type": "main"}},
+            "worker": {"description": "Worker implements", "action": {"type": "spawn_agent", "role": "worker", "tool": "spawn_agent",
+                       "input": {"agent_type": "agent_tree_worker", "message": "A public example task"}}}}}
+        self.assertIn("which_agent", finish(self.journal)["missing"])
+        with self.assertRaises(ValueError):
+            fork(self.journal, self.request)
+        with patch("control.subprocess.run", return_value=self.response({"worker": .60, "main": .30, "sol": .10}, .20)):
+            selected = fork(self.journal, request)
+        self.assertEqual(selected["route"], "sharp")
+        self.assertEqual(selected["actor"], "jev")
+        self.assertEqual(selected["call"]["input"]["agent_type"], "agent_tree_worker")
+        self.assertIsNone(self.journal.get("agent_route"))
+        self.assertIn("which_agent", finish(self.journal)["missing"])
+        dispatch(self.journal, selected["id"], "stop", "sol")
+
+    def test_agent_split_cannot_be_resolved_by_sol(self):
+        self.journal.put("agent_route", None)
+        request = {**self.request, "kind": "which_agent", "options": {
+            "main": {"description": "Sol implements directly", "action": {"type": "main"}},
+            "worker": {"description": "Worker implements", "action": {"type": "spawn_agent", "role": "worker", "tool": "spawn_agent",
+                       "input": {"agent_type": "agent_tree_worker", "message": "A public example task"}}}}}
+        with patch("control.subprocess.run", return_value=self.response({"sol": .5, "worker": .3, "main": .2}, .5)):
             result = fork(self.journal, request)
         self.assertEqual(result["route"], "split")
-        result = dispatch(self.journal, result["id"], "explorer", "sol")
-        self.assertEqual(result["call"]["input"]["agent_type"], "agent_tree_explorer")
-        self.assertEqual(result["actor"], "sol")
+        with self.assertRaises(ValueError):
+            dispatch(self.journal, result["id"], "main", "sol")
         dispatch(self.journal, result["id"], "stop", "sol")
-        self.assertEqual(finish(self.journal)["unresolved"], [])
+        with patch("control.subprocess.run", return_value=self.response({"main": .6, "worker": .3, "sol": .1}, .3)):
+            selected = fork(self.journal, request)
+        self.assertEqual(selected["result"]["agent"], "main")
+        self.assertEqual(self.journal.get("agent_route")["role"], "main")
+
+    def test_selected_worker_is_confirmed_from_codex_metadata(self):
+        self.journal.put("agent_route", None)
+        self.journal.put("root_thread", "main-id")
+        request = {**self.request, "kind": "which_agent", "options": {
+            "main": {"description": "Sol implements", "action": {"type": "main"}},
+            "worker": {"description": "Worker implements", "action": {"type": "spawn_agent", "role": "worker", "tool": "spawn_agent",
+                       "input": {"agent_type": "agent_tree_worker", "message": "Implement a bounded task"}}}}}
+        with patch("control.subprocess.run", return_value=self.response({"worker": .7, "main": .2, "sol": .1}, .4)):
+            selected = fork(self.journal, request)
+        with self.assertRaises(ValueError):
+            confirm_agent(self.journal, selected["id"], "unobserved")
+        sessions = self.root / "sessions"
+        folder = sessions / datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        folder.mkdir(parents=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        records = [
+            {"type": "session_meta", "payload": {"id": "worker-id", "cwd": str(self.root), "agent_role": "agent_tree_worker",
+             "timestamp": timestamp, "source": {"subagent": {"thread_spawn": {"parent_thread_id": "main-id", "agent_path": "/root/worker"}}}}},
+            {"timestamp": timestamp, "type": "turn_context", "payload": {"model": "gpt-6-sol"}},
+            {"timestamp": timestamp, "type": "event_msg", "payload": {"type": "task_started"}}]
+        (folder / "worker.jsonl").write_text("\n".join(map(json.dumps, records)) + "\n")
+        Observer(self.journal, sessions).poll()
+        confirmed = confirm_agent(self.journal, selected["id"], "/root/worker")
+        self.assertEqual(confirmed["role"], "worker")
+        self.assertEqual(self.journal.get("agent_route")["actor"], "jev")
+        self.assertEqual(self.journal.get("decision:" + selected["id"])["status"], "completed")
+
+    def test_incomplete_skill_retro_can_recover_after_missing_route(self):
+        self.journal.put("checkpoint:before_done", {"status": "completed"})
+        self.journal.put("agent_route", None)
+        self.assertFalse(finish(self.journal)["passed"])
+        finalize_retro(self.journal, False)
+        self.journal.put("agent_route", {"role": "main", "actor": "jev"})
+        self.assertTrue(finish(self.journal)["passed"])
+        report = finalize_retro(self.journal, True)
+        self.assertTrue(report["workflow_passed"])
+        self.assertTrue(json.loads((self.journal.directory / "retro.json").read_text())["workflow_passed"])
 
     def test_controller_escape_does_not_allow_shell_chains(self):
         valid = "python3 .agent-tree/control.py --run-id test status"
@@ -181,8 +240,6 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(hook("PermissionRequest", tool_name="Bash", tool_input={"command": "private"}), {})
         self.assertEqual(hook("Stop")["decision"], "block")
         self.assertNotIn("decision", hook("Stop", stop_hook_active=True))
-        with JournalContext(self.root, run) as journal:
-            self.assertFalse(journal.get("retro")["workflow_passed"])
         second = hook("UserPromptSubmit", turn_id="turn-2")
         self.assertNotEqual(first, second)
         with JournalContext(self.root, "sessions") as index:
@@ -193,31 +250,6 @@ class ForkTests(unittest.TestCase):
         hook("SubagentStop", agent_id="review", model="gpt-6-astra")
         with JournalContext(self.root, next_run) as journal:
             self.assertIsNone(journal.get("agent:review"))
-
-    def test_stop_creates_one_retro_from_observed_events(self):
-        base = {"cwd": str(self.root), "session_id": "retro-parent", "turn_id": "one"}
-        handle({**base, "hook_event_name": "UserPromptSubmit"}, self.root)
-        with JournalContext(self.root, "sessions") as index:
-            run = index.get("session:retro-parent")["run_id"]
-        with JournalContext(self.root, run) as journal:
-            journal.put("checkpoint:before_plan", {"status": "completed"})
-            journal.put("checkpoint:before_done", {"status": "completed"})
-            journal.emit("agent.observed", id="review", role="agent_tree_astra")
-            journal.emit("fork.started", kind="which_file")
-            journal.emit("fork.decided", kind="which_file", route="split")
-            journal.emit("checkpoint.invalidated", name="before_done")
-            journal.emit("tool.activity", status="returned")
-        self.assertEqual(handle({**base, "hook_event_name": "Stop"}, self.root), {})
-        self.assertEqual(handle({**base, "hook_event_name": "Stop"}, self.root), {})
-        with JournalContext(self.root, run) as journal:
-            report = journal.get("retro")
-            self.assertEqual(report["agents"]["astra"], 1)
-            self.assertEqual(report["jev_forks"], 1)
-            self.assertEqual(report["review_restarts"], 1)
-            self.assertEqual(report["tool_hook_events"], 1)
-            self.assertEqual(report["quality"], "not_measured")
-            self.assertEqual(sum(event["type"] == "workflow.retro" for event in journal.events()), 1)
-            self.assertEqual(json.loads((journal.directory / "retro.json").read_text()), report)
 
     def test_launcher_and_hooks_share_run_even_when_prompt_event_replays(self):
         base = {"cwd": str(self.root), "session_id": "launched-parent", "hook_event_name": "UserPromptSubmit", "turn_id": "one"}

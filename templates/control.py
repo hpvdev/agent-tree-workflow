@@ -6,11 +6,13 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
 import uuid
 from runtime import Journal, ROOT, settings
+from observer import Observer
 
 
 def project_file(root, name):
@@ -25,8 +27,10 @@ def project_file(root, name):
 
 
 def validate_action(root, action):
-    if not isinstance(action, dict) or action.get("type") not in ("read_file", "search_text", "stop", "native_tool", "spawn_agent"):
+    if not isinstance(action, dict) or action.get("type") not in ("read_file", "search_text", "stop", "native_tool", "spawn_agent", "main"):
         raise ValueError("Action không được hỗ trợ.")
+    if action["type"] == "main":
+        return
     if action["type"] in ("native_tool", "spawn_agent"):
         if not isinstance(action.get("tool"), str) or not action["tool"].strip() or not isinstance(action.get("input"), dict):
             raise ValueError("Native action cần tool và input object đúng với hook của runtime.")
@@ -50,6 +54,8 @@ def execute(root, action):
     validate_action(root, action)
     if action["type"] == "stop":
         return {"stopped": True, "scope": "current fork only"}
+    if action["type"] == "main":
+        return {"agent": "main", "instruction": "Jev selected Sol to execute this work."}
     text = project_file(root, action["path"]).read_text()
     if action["type"] == "read_file":
         return {"path": action["path"], "content": text[:16000], "truncated": len(text) > 16000}
@@ -121,17 +127,23 @@ def fork(journal, request):
         return {"route": "astra", **request_checkpoint(journal, "before_plan")}
     if request.get("kind") not in ("which_file", "which_tool", "which_agent", "retry_or_stop"):
         raise ValueError("Loại điểm rẽ không hợp lệ.")
+    if request["kind"] != "which_agent" and not journal.get("agent_route"):
+        raise ValueError("Jev phải chọn agent thực hiện trước các điểm rẽ khác.")
     options = request.get("options", {})
     if not 2 <= len(options) <= 12 or "sol" in options:
         raise ValueError("Cung cấp 2–12 lựa chọn, không dùng nhãn sol đã dành cho fallback.")
     if request.get("non_sensitive") is not True:
         raise ValueError("Chỉ gửi state/question/description không nhạy cảm đến Jev; cần non_sensitive=true sau khi kiểm tra.")
+    if request["kind"] == "which_agent" and not journal.get("agent_route") and not any(isinstance(option, dict) and isinstance(option.get("action"), dict) and option["action"].get("type") == "main" for option in options.values()):
+        raise ValueError("Lựa chọn agent đầu lượt phải gồm Sol/main để Jev có thể chọn thực hiện trực tiếp.")
     for label, option in options.items():
         if not isinstance(label, str) or not isinstance(option.get("description"), str):
             raise ValueError("Mỗi lựa chọn cần nhãn và mô tả.")
         validate_action(journal.root, option["action"])
-        if request["kind"] == "which_agent" and option["action"]["type"] not in ("spawn_agent", "stop"):
-            raise ValueError("which_agent chỉ chọn agent hoặc dừng phân công.")
+        if request["kind"] == "which_agent" and option["action"]["type"] not in ("spawn_agent", "main", "stop"):
+            raise ValueError("which_agent chỉ chọn Sol/main, agent con hoặc dừng phân công.")
+        if request["kind"] != "which_agent" and option["action"]["type"] == "main":
+            raise ValueError("Action Sol/main chỉ dùng để chọn agent.")
     if request["kind"] == "retry_or_stop":
         key = request.get("failure_key")
         if not key:
@@ -171,6 +183,9 @@ def fork(journal, request):
             raise ValueError("Jev không hoàn tất yêu cầu.")
         output = json.loads(result.stdout)
         outcome = classify(output["answers"]["route"], criteria, config)
+        if request["kind"] == "which_agent" and outcome["choice"] != "sol" and outcome["margin"] > 0:
+            # Agent ownership belongs to Jev even when its confidence is below the generic action threshold.
+            outcome["route"] = "sharp"
         outcome.update(model=output.get("model"), usage=output.get("usage"))
     except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
         outcome = {"route": "split", "reason": "Jev unavailable or invalid output; Sol must decide."}
@@ -179,7 +194,10 @@ def fork(journal, request):
     journal.emit("fork.decided", id=decision_id, kind=request["kind"], **outcome)
     if outcome["route"] == "sharp":
         return dispatch(journal, decision_id, outcome["choice"], "jev")
-    return {"id": decision_id, **outcome, "instruction": "Sol must reason from available evidence, then call resolve with a listed choice or stop. No action has run."}
+    instruction = ("Agent choice remains with Jev. Gather narrow evidence, resolve this decision to stop, then ask Jev again."
+                   if request["kind"] == "which_agent" else
+                   "Sol must reason from available evidence, then call resolve with a listed choice or stop. No action has run.")
+    return {"id": decision_id, **outcome, "instruction": instruction}
 
 
 def dispatch(journal, decision_id, choice, actor):
@@ -191,6 +209,8 @@ def dispatch(journal, decision_id, choice, actor):
         return {"id": decision_id, "stopped": True}
     if not decision or decision["status"] != "pending":
         raise ValueError("Điểm rẽ đã xử lý hoặc không tồn tại; không chạy lại hành động.")
+    if decision["kind"] == "which_agent" and actor != "jev" and choice != "stop":
+        raise ValueError("Chỉ Jev được chọn agent; hãy dừng điểm rẽ thiếu bằng chứng rồi hỏi lại Jev.")
     if choice == "sol" or choice not in decision["options"]:
         raise ValueError("Chỉ thực hiện lựa chọn trong tập đã khai báo.")
     action = decision["options"][choice]["action"]
@@ -227,11 +247,47 @@ def dispatch(journal, decision_id, choice, actor):
         decision["status"] = "failed"
     journal.put("decision:" + decision_id, decision)
     journal.emit("fork.executed", id=decision_id, choice=choice, actor=actor, action=action["type"], status=decision["status"])
+    if decision["kind"] == "which_agent" and action["type"] == "main" and decision["status"] == "completed" and not journal.get("agent_route"):
+        journal.put("agent_route", {"role": "main", "decision_id": decision_id, "actor": actor})
     return {"id": decision_id, "route": decision["route"], "choice": choice, "actor": actor, "result": result}
 
 
 def native_signature(tool, arguments):
     return hashlib.sha256(json.dumps([tool, arguments], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def observed_agent(journal, agent_id):
+    agent = journal.get("agent:" + agent_id)
+    if agent:
+        return agent
+    matches = [json.loads(row[0]) for row in journal.db.execute("SELECT data FROM state WHERE key LIKE 'agent:%'")
+               if json.loads(row[0]).get("agent_path") == agent_id]
+    return matches[0] if len(matches) == 1 else None
+
+
+def confirm_agent(journal, decision_id, agent_id):
+    decision = journal.get("decision:" + decision_id)
+    if not decision or decision["kind"] != "which_agent" or decision["status"] != "awaiting_native":
+        raise ValueError("Chưa có lựa chọn agent đang chờ xác nhận.")
+    action = decision["options"][decision["selected"]]["action"]
+    if action["type"] != "spawn_agent":
+        raise ValueError("Lựa chọn này không tạo agent con.")
+    agent = observed_agent(journal, agent_id)
+    ready = next((event for event in journal.events() if event["type"] == "fork.ready" and event.get("id") == decision_id), None)
+    if not agent or not ready or agent.get("role") != "agent_tree_" + action["role"] or agent.get("parent") != journal.get("root_thread"):
+        raise ValueError("Chưa quan sát được agent đã chọn trong phiên này; chờ metadata rồi thử lại.")
+    try:
+        fresh = datetime.fromisoformat(agent["created_at"].replace("Z", "+00:00")) >= datetime.fromisoformat(ready["time"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        fresh = False
+    if not fresh or agent.get("model") != settings(journal.root)[action["role"] + "_model"]:
+        raise ValueError("Agent quan sát được chưa khớp thời điểm hoặc model đã chọn.")
+    decision.update(status="completed", agent_id=agent["id"])
+    journal.put("decision:" + decision_id, decision)
+    journal.emit("fork.agent_confirmed", id=decision_id, agent_id=agent["id"], role=action["role"])
+    if not journal.get("agent_route"):
+        journal.put("agent_route", {"role": action["role"], "decision_id": decision_id, "actor": "jev"})
+    return {"id": decision_id, "agent_id": agent["id"], "role": action["role"], "status": "completed"}
 
 
 def native_event(journal, tool, arguments, call_id, phase, failed=False):
@@ -255,6 +311,9 @@ def native_event(journal, tool, arguments, call_id, phase, failed=False):
             journal.db.commit()
             journal.emit("fork.native_started" if phase == "pre" else "fork.native_returned", id=decision["id"],
                          choice=decision["selected"], actor=decision["actor"], tool=tool, call_id=call_id, status=decision["status"])
+            if phase == "post" and decision["status"] == "completed" and decision["kind"] == "which_agent" and not journal.get("agent_route"):
+                journal.put("agent_route", {"role": decision["options"][decision["selected"]]["action"]["role"],
+                                            "decision_id": decision["id"], "actor": decision["actor"]})
             return decision["id"]
         journal.db.commit()
         return None
@@ -279,6 +338,8 @@ def failure(journal, key, source="agent_report"):
 
 def finish(journal):
     missing = [name for name in ("before_plan", "before_done") if (journal.get("checkpoint:" + name) or {}).get("status") != "completed"]
+    if not journal.get("agent_route"):
+        missing.append("which_agent")
     repeated = journal.get("checkpoint:error_repeats")
     if repeated and repeated["status"] != "completed":
         missing.append("error_repeats")
@@ -291,7 +352,7 @@ def finish(journal):
 def finalize_retro(journal, passed):
     """Summarize observed coordination once, after the turn has ended."""
     existing = journal.get("retro")
-    if existing:
+    if existing and (existing["workflow_passed"] or not passed):
         return existing
     events = journal.events()
     agents = {event["id"]: event.get("role", "unknown") for event in events
@@ -320,7 +381,7 @@ def finalize_retro(journal, passed):
     except OSError:
         pass  # A reporting file must not block a completed Codex turn.
     journal.put("retro", report)
-    journal.emit("workflow.retro", **report)
+    journal.emit("workflow.retro_updated" if existing else "workflow.retro", **report)
     return report
 
 
@@ -328,8 +389,10 @@ def main():
     parser = argparse.ArgumentParser(description="Tầng quyết định Jev và checkpoint Agent Tree")
     parser.add_argument("--run-id")
     commands = parser.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("fork"); p.add_argument("--input", default="-", help="JSON trên stdin hoặc đường dẫn file"); p.add_argument("--json", help="JSON inline để gọi controller trong native hooks")
+    commands.add_parser("begin")
+    p = commands.add_parser("fork"); p.add_argument("--input", default="-", help="JSON trên stdin hoặc đường dẫn file"); p.add_argument("--json", help="JSON inline cho một quyết định Jev")
     p = commands.add_parser("resolve"); p.add_argument("decision_id"); p.add_argument("choice")
+    p = commands.add_parser("confirm-agent"); p.add_argument("decision_id"); p.add_argument("agent_id")
     p = commands.add_parser("checkpoint"); p.add_argument("name", choices=("before_plan", "error_repeats", "before_done")); p.add_argument("--agent-id")
     p = commands.add_parser("failure"); p.add_argument("fingerprint")
     commands.add_parser("finish")
@@ -337,11 +400,23 @@ def main():
     args = parser.parse_args()
     journal = None
     try:
+        if args.command == "begin":
+            if not os.environ.get("CODEX_THREAD_ID"):
+                raise ValueError("Codex chưa cung cấp thread ID; không thể xác minh agent trong skill.")
+            journal = Journal(run_id=uuid.uuid4().hex)
+            journal.put("root_thread", os.environ["CODEX_THREAD_ID"])
+            journal.emit("session.turn", session=os.environ["CODEX_THREAD_ID"], status="running", mode="skill")
+            print(json.dumps({"run_id": journal.run_id}, ensure_ascii=False))
+            return 0
         journal = Journal(run_id=args.run_id)
+        if journal.get("root_thread") and journal.get("transport") != "hooks":
+            Observer(journal).poll()
         if args.command == "fork":
             value = fork(journal, json.loads(args.json) if args.json is not None else (json.load(sys.stdin) if args.input == "-" else json.loads(Path(args.input).read_text())))
         elif args.command == "resolve":
             value = dispatch(journal, args.decision_id, args.choice, "sol")
+        elif args.command == "confirm-agent":
+            value = confirm_agent(journal, args.decision_id, args.agent_id)
         elif args.command == "checkpoint":
             value = complete_checkpoint(journal, args.name, args.agent_id) if args.agent_id else request_checkpoint(journal, args.name)
         elif args.command == "failure":
@@ -351,6 +426,7 @@ def main():
                      "checkpoints": {name: journal.get("checkpoint:" + name) for name in ("before_plan", "error_repeats", "before_done")}}
         else:
             value = finish(journal)
+            finalize_retro(journal, value["passed"])
         print(json.dumps(value, ensure_ascii=False))
         return 0 if value.get("passed", True) else 2
     except (OSError, ValueError, KeyError, TypeError) as error:

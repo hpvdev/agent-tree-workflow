@@ -16,7 +16,8 @@ class Observer:
         self.sessions = Path(sessions) if sessions else Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
         self.tracked = {}
         self.checked = set()
-        self.since = time.time() - 10
+        first = journal.db.execute("SELECT time FROM events ORDER BY seq LIMIT 1").fetchone()
+        self.since = datetime.fromisoformat(first[0]).timestamp() - 10 if first else time.time() - 10
 
     def poll(self):
         root_id = self.journal.get("root_thread")
@@ -47,10 +48,13 @@ class Observer:
                     continue
                 role = meta.get("agent_role") or spawn.get("agent_role") or ("main" if thread == root_id else "unknown")
                 agent = {"id": thread, "agent_path": spawn.get("agent_path"), "created_at": meta.get("timestamp"), "parent": parent, "role": role, "status": "observed", "model": None}
-                self.tracked[path] = {**agent, "offset": 0, "usage": None, "started": meta.get("timestamp", "")}
+                existing = self.journal.get("agent:" + thread)
+                self.tracked[path] = {**(existing or agent), "offset": 0,
+                                      "usage": self.journal.get("agent_usage:" + thread), "started": meta.get("timestamp", "")}
                 self.checked.add(path)
-                self.journal.put("agent:" + thread, agent)
-                self.journal.emit("agent.observed", **agent)
+                if not existing:
+                    self.journal.put("agent:" + thread, agent)
+                    self.journal.emit("agent.observed", **agent)
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
         for path, info in list(self.tracked.items()):
@@ -80,10 +84,12 @@ class Observer:
                                 usage = (payload.get("info") or {}).get("total_token_usage")
                                 if usage and usage != info["usage"]:
                                     info["usage"] = usage
+                                    self.journal.put("agent_usage:" + info["id"], usage)
                                     self.journal.emit("agent.usage", id=info["id"], role=info["role"], usage=usage)
                         if changed:
                             agent = {k: info[k] for k in ("id", "agent_path", "created_at", "parent", "role", "model", "status")}
-                            self.journal.put("agent:" + info["id"], agent)
-                            self.journal.emit("agent.state", **agent)
+                            if self.journal.get("agent:" + info["id"]) != agent:
+                                self.journal.put("agent:" + info["id"], agent)
+                                self.journal.emit("agent.state", **agent)
             except (OSError, ValueError, TypeError, AttributeError):
                 self.journal.emit("observer.warning", message="Không đọc được một phần metadata; không suy đoán trạng thái.")

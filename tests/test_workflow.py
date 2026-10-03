@@ -1,7 +1,6 @@
-import contextlib
 import hashlib
-import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,8 +8,6 @@ import tempfile
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SOURCE / "templates"))
-import launcher
 
 
 class WorkflowTests(unittest.TestCase):
@@ -26,22 +23,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return result
 
-    def test_install_reinstall_uninstall_preserves_existing_files(self):
+    def test_install_is_explicit_only_and_preserves_project_files(self):
+        agents = self.root / "AGENTS.md"
         original = b"# Existing rules\r\nKeep this.\r\n"
-        (self.root / "AGENTS.md").write_bytes(original)
+        agents.write_bytes(original)
         (self.root / ".codex").mkdir()
+        hooks = self.root / ".codex/hooks.json"
+        hooks.write_text('{"hooks":{"Stop":[]}}')
         config = self.root / ".codex/config.toml"
         config.write_text('model = "existing-model"\n')
         self.cli("install")
-        first = (self.root / "AGENTS.md").read_bytes()
         self.cli("install")
-        self.assertEqual(first, (self.root / "AGENTS.md").read_bytes())
-        (self.root / "AGENTS.md").write_bytes(first + b"\nLater project note.\n")
-        self.cli("uninstall")
-        self.assertEqual((self.root / "AGENTS.md").read_bytes(), original + b"\nLater project note.\n")
+        self.assertEqual(agents.read_bytes(), original)
+        self.assertEqual(hooks.read_text(), '{"hooks":{"Stop":[]}}')
         self.assertEqual(config.read_text(), 'model = "existing-model"\n')
+        skill = self.root / ".codex/skills/agent-tree/SKILL.md"
+        self.assertTrue(skill.is_file())
+        policy = (self.root / ".codex/skills/agent-tree/agents/openai.yaml").read_text()
+        self.assertIn("allow_implicit_invocation: false", policy)
+        self.cli("uninstall")
+        self.assertFalse(skill.exists())
+        self.assertEqual(agents.read_bytes(), original)
+        self.assertEqual(hooks.read_text(), '{"hooks":{"Stop":[]}}')
 
-    def test_model_changes_update_roles_and_launcher(self):
+    def test_model_changes_update_roles(self):
         self.cli("install", "--main-effort", "low")
         self.cli("configure", "--main-model", "future-main", "--worker-model", "future-worker",
                  "--worker-effort", "high", "--max-agents", "2")
@@ -52,49 +57,44 @@ class WorkflowTests(unittest.TestCase):
         role = (self.root / ".codex/agents/agent_tree_worker.toml").read_text()
         self.assertIn('model = "future-worker"', role)
         self.assertIn('model_reasoning_effort = "high"', role)
-        result = subprocess.run([sys.executable, str(self.root / ".agent-tree/run.py"),
-                                 "--print-command", "Do a task"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("future-main", result.stdout)
-        self.assertIn("exec --json", result.stdout)
-        self.assertIn("--approve-for-me", result.stdout)
-        self.assertNotIn("bypass", result.stdout)
-        self.cli("uninstall")
-        self.assertFalse((self.root / "AGENTS.md").exists())
 
     def test_collision_and_symlink_do_not_mutate_project(self):
-        (self.root / ".codex/agents").mkdir(parents=True)
         role = self.root / ".codex/agents/agent_tree_worker.toml"
+        role.parent.mkdir(parents=True)
         role.write_text("existing role")
         self.cli("install", success=False)
-        self.assertFalse((self.root / "AGENTS.md").exists())
-        self.assertFalse((self.root / ".agent-tree").exists())
         self.assertEqual(role.read_text(), "existing role")
+        self.assertFalse((self.root / ".agent-tree").exists())
         role.unlink()
         outside = Path(self.temp.name) / "outside"
-        outside.write_text("outside")
-        (self.root / "AGENTS.md").symlink_to(outside)
+        outside.mkdir()
+        (self.root / ".codex/skills").symlink_to(outside)
         self.cli("install", success=False)
-        self.assertEqual(outside.read_text(), "outside")
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_uninstall_refuses_modified_owned_file(self):
         self.cli("install")
-        path = self.root / ".codex/agents/agent_tree_worker.toml"
-        path.write_text(path.read_text() + "# manual edit\n")
+        path = self.root / ".codex/skills/agent-tree/SKILL.md"
+        path.write_text(path.read_text() + "\nmanual edit\n")
         self.cli("uninstall", success=False)
-        self.assertTrue((self.root / "AGENTS.md").exists())
         self.assertTrue(path.exists())
 
-    def test_upgrade_preserves_models_and_logs(self):
+    def test_upgrade_removes_legacy_hooks_and_agent_rules_but_keeps_logs(self):
         self.cli("install")
         self.cli("configure", "--main-model", "my-next-model", "--jev-confidence", "0.92")
-        legacy = ("Xem Agent Tree.command", ".agent-tree/monitor.py", ".agent-tree/watch.py", ".agent-tree/display.py")
         manifest_path = self.root / ".agent-tree/manifest.json"
         manifest = json.loads(manifest_path.read_text())
+        legacy = ("Xem Agent Tree.command", ".agent-tree/monitor.py", ".agent-tree/watch.py", ".agent-tree/display.py", ".agent-tree/hooks.py")
         for name in legacy:
-            content = b"legacy Watch file\n"
+            content = b"legacy managed file\n"
             (self.root / name).write_bytes(content)
             manifest["files"][name] = hashlib.sha256(content).hexdigest()
+        block = "<!-- agent-tree:start -->\nold rules\n<!-- agent-tree:end -->\n"
+        (self.root / "AGENTS.md").write_text(block)
+        group = {"hooks": [{"type": "command", "command": "echo old"}]}
+        hooks = {"hooks": {"Stop": [group]}}
+        (self.root / ".codex/hooks.json").write_text(json.dumps(hooks))
+        manifest.update(version=3, agents_existed=False, block=block, hooks_original=None, hook_groups={"Stop": group})
         manifest_path.write_text(json.dumps(manifest))
         logs = self.root / ".agent-tree/logs"
         logs.mkdir()
@@ -104,46 +104,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved["main_model"], "my-next-model")
         self.assertEqual(saved["jev"]["confidence"], .92)
         self.assertEqual((logs / "keep.jsonl").read_text(), "keep this log\n")
-        self.assertEqual((self.root / "AGENTS.md").read_text().count("<!-- agent-tree:start -->"), 1)
-        self.assertTrue((self.root / ".agent-tree/launcher.py").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertFalse((self.root / ".codex/hooks.json").exists())
         self.assertTrue(all(not (self.root / name).exists() for name in legacy))
+        self.assertTrue((self.root / ".codex/skills/agent-tree/SKILL.md").exists())
 
-    def test_hooks_merge_preserves_existing_and_later_user_hooks(self):
-        (self.root / ".codex").mkdir()
-        path = self.root / ".codex/hooks.json"
-        existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo original"}]}]}}
-        original = json.dumps(existing)
-        path.write_text(original)
+    def test_skill_run_begins_only_when_called_and_writes_retro(self):
         self.cli("install")
-        self.assertEqual(len(json.loads(path.read_text())["hooks"]["Stop"]), 2)
-        self.cli("uninstall")
-        self.assertEqual(path.read_text(), original)
-        self.cli("install")
-        value = json.loads(path.read_text())
-        added = {"hooks": [{"type": "command", "command": "echo later"}]}
-        value["hooks"]["Stop"].append(added)
-        path.write_text(json.dumps(value))
-        self.cli("upgrade")
-        self.cli("uninstall")
-        self.assertEqual(json.loads(path.read_text())["hooks"]["Stop"], existing["hooks"]["Stop"] + [added])
-
-    def test_launcher_saves_real_subprocess_stream_and_retro(self):
-        self.cli("install")
-        events = [{"type": "turn.started"}, {"type": "item.completed", "item": {"type": "agent_message", "text": "Done"}},
-                  {"type": "turn.completed", "usage": {"output_tokens": 3}}]
-        script = "import json; events=" + repr(events) + "; [print(json.dumps(e),flush=True) for e in events]"
-        emitter = self.root / "emit.py"
-        emitter.write_text(script)
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            status = launcher.trace([sys.executable, str(emitter), "test request"], self.root)
-        self.assertEqual(status, 2)  # A successful Codex turn cannot fake missing Astra checkpoints.
-        paths = list((self.root / ".agent-tree/logs").glob("*/codex.jsonl"))
-        self.assertEqual(len(paths), 1)
-        self.assertEqual([json.loads(line) for line in paths[0].read_text().splitlines()], events)
-        self.assertIn("Done", output.getvalue())
-        self.assertFalse(json.loads((paths[0].parent / "retro.json").read_text())["workflow_passed"])
-        self.cli("uninstall")
-        self.assertTrue(paths[0].exists())
+        script = self.root / ".agent-tree/control.py"
+        environment = dict(os.environ, CODEX_THREAD_ID="test-thread")
+        begin = subprocess.run([sys.executable, str(script), "begin"], cwd=self.root, env=environment,
+                               capture_output=True, text=True)
+        self.assertEqual(begin.returncode, 0, begin.stderr + begin.stdout)
+        run_id = json.loads(begin.stdout)["run_id"]
+        self.assertFalse((self.root / ".agent-tree/logs" / run_id / "retro.json").exists())
+        finish = subprocess.run([sys.executable, str(script), "--run-id", run_id, "finish"], cwd=self.root,
+                                env=environment, capture_output=True, text=True)
+        self.assertEqual(finish.returncode, 2)
+        report = json.loads((self.root / ".agent-tree/logs" / run_id / "retro.json").read_text())
+        self.assertFalse(report["workflow_passed"])
+        self.assertEqual(report["jev_forks"], 0)
 
 
 if __name__ == "__main__":
