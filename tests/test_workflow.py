@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE / "templates"))
 spec = importlib.util.spec_from_file_location("monitor", SOURCE / "templates/monitor.py")
 monitor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(monitor)
@@ -59,6 +60,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("future-main", result.stdout)
         self.assertIn("exec --json", result.stdout)
+        self.assertIn("--approve-for-me", result.stdout)
         self.assertNotIn("bypass", result.stdout)
         self.cli("uninstall")
         self.assertFalse((self.root / "AGENTS.md").exists())
@@ -86,6 +88,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((self.root / "AGENTS.md").exists())
         self.assertTrue(path.exists())
 
+    def test_upgrade_preserves_models_and_logs(self):
+        self.cli("install")
+        self.cli("configure", "--main-model", "my-next-model", "--jev-confidence", "0.92")
+        logs = self.root / ".agent-tree/logs"
+        logs.mkdir()
+        (logs / "keep.jsonl").write_text("keep this log\n")
+        self.cli("upgrade")
+        saved = json.loads((self.root / ".agent-tree/settings.json").read_text())
+        self.assertEqual(saved["main_model"], "my-next-model")
+        self.assertEqual(saved["jev"]["confidence"], .92)
+        self.assertEqual((logs / "keep.jsonl").read_text(), "keep this log\n")
+        self.assertEqual((self.root / "AGENTS.md").read_text().count("<!-- agent-tree:start -->"), 1)
+
     def test_event_monitor_reports_real_states_and_failure(self):
         view = monitor.Monitor()
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -104,10 +119,12 @@ class WorkflowTests(unittest.TestCase):
         events = [{"type": "turn.started"}, {"type": "item.completed", "item": {"type": "agent_message", "text": "Done"}},
                   {"type": "turn.completed", "usage": {"output_tokens": 3}}]
         script = "import json; events=" + repr(events) + "; [print(json.dumps(e),flush=True) for e in events]"
+        emitter = self.root / "emit.py"
+        emitter.write_text(script)
         with contextlib.redirect_stdout(io.StringIO()):
-            status = monitor.trace([sys.executable, "-c", script], self.root, {})
-        self.assertEqual(status, 0)
-        paths = list((self.root / ".agent-tree/logs").glob("*.jsonl"))
+            status = monitor.trace([sys.executable, str(emitter), "test request"], self.root, {})
+        self.assertEqual(status, 2)  # A successful Codex turn cannot fake missing Astra checkpoints.
+        paths = list((self.root / ".agent-tree/logs").glob("*/codex.jsonl"))
         self.assertEqual(len(paths), 1)
         self.assertEqual([json.loads(line) for line in paths[0].read_text().splitlines()], events)
         with contextlib.redirect_stdout(io.StringIO()) as output:

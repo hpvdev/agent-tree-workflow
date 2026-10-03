@@ -1,34 +1,45 @@
-## Agent Tree — workflow của project này
+## Agent Tree — project workflow
 
-Workflow này chỉ áp dụng trong cây thư mục của project chứa file này. Người dùng cài workflow để cho phép gọi subagent theo các điều kiện dưới đây. Chỉ dẫn trực tiếp của người dùng, quy định của runtime và ràng buộc riêng của repository vẫn được ưu tiên.
+This workflow applies only inside this project. The user explicitly requests native subagents under this workflow. Main is Sol/high; worker is Sol/medium; explorer/researcher are Luna/medium; Astra is on call. Actual model IDs, effort and limits come from `.agent-tree/settings.json` and `.codex/agents/agent_tree_*.toml`. Respect higher-priority instructions and the user's current task scope.
 
-### Luồng thực hiện
+### Main agent protocol
 
-1. Agent chính xác định mục tiêu, phạm vi, tiêu chí hoàn tất và đọc các chỉ dẫn gần phần code cần sửa. Việc nhỏ, rõ ràng: triển khai trực tiếp, không tạo kế hoạch hay gọi agent cho đủ quy trình.
-2. Với việc lớn có các phần độc lập, phân công các vai trò phù hợp bên dưới. Mỗi agent nhận một đầu việc, dữ kiện cần thiết, phạm vi file được sửa và tiêu chí hoàn tất. Không giao hai worker sửa cùng file đồng thời. Agent chính tiếp tục phần việc độc lập và tích hợp kết quả.
-3. Chỉ gọi Astra tại các mốc: trước khi chọn thiết kế phức tạp hoặc rủi ro; khi cùng lỗi vẫn còn sau hai cách xử lý khác nhau; trước khi hoàn tất thay đổi đáng kể hoặc rủi ro. Gửi mục tiêu, phương án/diff liên quan và bằng chứng kiểm tra. Astra tư vấn, agent chính quyết định và sửa code. Bỏ qua các mốc này cho thay đổi nhỏ thông thường.
-4. Kiểm tra diff, chạy kiểm tra nhỏ nhất liên quan sau khi hoàn tất phần triển khai. Không chạy lại kiểm tra đã đạt nếu không có thay đổi liên quan. Chờ các kết quả cần thiết rồi báo thay đổi, kiểm tra đã chạy và phần chưa xác minh.
+Run through `.agent-tree/run.py "task"` to enable the controller and observer. The launch prompt provides RUN_ID. Use `python3 .agent-tree/control.py --run-id RUN_ID ...` (substitute the actual ID).
 
-### Vai trò và model
+1. **Before a plan:** call `checkpoint before_plan`, spawn native `agent_tree_astra` with the goal, constraints and relevant initial evidence; wait for its advice. Call `checkpoint before_plan --agent-id ACTUAL_ID`. If observation is still pending, wait briefly and retry completion. Never edit the journal to simulate a review. Astra advises; Sol owns the plan and writes code.
+2. **Jev fork layer:** use `fork` at narrow semantic decisions about which file, which tool, or retry/stop. Known facts and deterministic lookups stay in ordinary code. Prepare the JSON described below and send it on stdin or use `fork --input FILE`. `sharp` executes the selected bounded action in Python; use its result. `split` executes nothing: Sol reasons from the evidence and calls `resolve DECISION_ID CHOICE` or `resolve DECISION_ID stop`. Do not merely mention Jev and bypass the controller. Do not invent a fork when there is no genuine choice.
+3. **Spawn work:** delegate independent bounded work to worker, explorer and researcher as useful, with file ownership, constraints and acceptance criteria. Worker edits and runs assigned checks; explorer reads code; researcher reads primary docs. Respect the configured maximum (default six) and lower runtime limits. Avoid concurrent edits to the same file. Main continues independent work. Children do not recursively delegate or run main checkpoints.
+4. **Error repeats:** when the same underlying failure happens, call `failure "stable non-sensitive description"` for each occurrence. On the second and every subsequent recurrence the controller requests `error_repeats`; spawn a fresh Astra with the evidence, await advice, complete that checkpoint before another retry. Use the returned failure_key in a retry fork. Retry budget is enforced by code. Astra may identify a wrong fixture/environment rather than a code bug.
+5. **Back to Sol:** integrate and inspect actual changes, run the smallest relevant validation, apply justified fixes. Keep code review separate from execution approvals.
+6. **Before done:** call `checkpoint before_done`, spawn a fresh Astra with relevant diff and test evidence, await review, then complete with its actual agent ID. Apply justified findings; if relevant code changes after review, request another before_done review. Finally call `finish`. Report missing checkpoints, unresolved decisions or unsupported capabilities honestly; a native turn ending is not enough to pass workflow audit.
 
-- Main: Sol/high; chịu trách nhiệm triển khai, tích hợp và xác minh cuối.
-- `agent_tree_worker`: Sol/medium; sửa code trong phạm vi được giao, kiểm tra liên quan và báo kết quả.
-- `agent_tree_explorer`: Luna/medium; chỉ đọc, tìm file, callsite và luồng thực thi liên quan; không audit toàn repo.
-- `agent_tree_researcher`: Luna/medium; chỉ đọc, kiểm chứng câu hỏi kỹ thuật hẹp bằng tài liệu chính thức phù hợp phiên bản.
-- `agent_tree_astra`: Astra/medium; chỉ review, chỉ ra lỗi và giả định sai bằng bằng chứng; không tự sửa code.
+Astra is silent outside these three checkpoint types and never edits code. Do not add a rule restricting these checkpoints to risky tasks or invent an arbitrary number of different repair attempts.
 
-Các tên model/effort trên là mặc định minh họa. Cấu hình hiện tại của project được ưu tiên: đọc model ID, effort từng vai trò và số agent tối đa tại `.agent-tree/settings.json`; định nghĩa chi tiết tại `.codex/agents/agent_tree_*.toml`. Dùng native subagents. Nếu runtime chỉ có `spawn_agent(model, reasoning_effort, message, ...)`, truyền model/effort trong settings, chỉ dẫn vai trò và ngữ cảnh tối thiểu; không tạo task ứng dụng hay gọi CLI lồng nhau để giả lập agent. Các agent con không được tự phân công tiếp. Giới hạn mặc định là sáu agent phụ đồng thời, nhưng luôn tuân thủ giới hạn thấp hơn của runtime. Tái sử dụng agent cho việc tiếp nối khi có thể.
+### Fork input
 
-Không tự đổi model khi model đã chọn không khả dụng. Báo giới hạn; nếu có thể, agent chính hoàn thành công việc trực tiếp và nêu phần review chưa thực hiện. Không tuyên bố agent đã chạy nếu thực tế chưa gọi được.
+Example: selecting which file to read, using non-sensitive descriptions only:
 
-### Jev — hỗ trợ quyết định hẹp
+```json
+{
+  "kind": "which_file",
+  "non_sensitive": true,
+  "state": "The task is to inspect a Python text normalization implementation. The candidates are the implementation and its introductory documentation.",
+  "question": "Which candidate should be read to understand the implementation?",
+  "options": {
+    "implementation": {"description": "Python implementation", "action": {"type": "read_file", "path": "slug.py"}},
+    "documentation": {"description": "Introductory documentation", "action": {"type": "read_file", "path": "README.md"}}
+  }
+}
+```
 
-Jev là tùy chọn, không phải bước bắt buộc cho mỗi thao tác. Dùng tìm kiếm và kiểm tra bằng code cho sự kiện xác định. Khi cần phân loại ngữ nghĩa trên dữ liệu không nhạy cảm, có thể dùng `jev ask` với trạng thái rõ ràng và câu hỏi typed (`--choice`, `--noul`, `--score`). Chỉ coi kết quả là bằng chứng. Kết quả mơ hồ, mâu thuẫn, lỗi hoặc thiếu Jev thì agent chính tự xử lý; không lặp gọi vô hạn. Không bịa confidence, không dùng kết quả làm quyền phê duyệt thao tác, không gửi code riêng tư hoặc bí mật khi chưa được phép.
+Allowed `kind`: `which_file`, `which_tool`, `retry_or_stop`. Options are a finite map of 2–12 candidates. The controller always adds a `sol` fallback for missing evidence/candidates. `which_tool` can compare `read_file` against `search_text` (which also takes literal `text`). `retry_or_stop` adds `failure_key` returned by `failure`, and compares retrying a bounded read/search action against `{ "type": "stop" }`. Stop stops the current fork, not an unrelated task.
 
-### Giữ đúng phạm vi
+Only `state`, `question` and option descriptions are sent to Jev. Paths and action arguments are kept local, unless you explicitly include them in those descriptions. Never set `non_sensitive` true for secrets, private code or sensitive personal data; request explicit user authorization or use Sol directly. No automatic file upload happens. Thresholds in settings are adjustable engineering policy, not numbers established by the reference image.
 
-Không tự tạo branch, worktree, commit, deploy hay nhắn tin bên ngoài. Không thay đổi cấu hình toàn cục hoặc project khác. Không tạo hệ thống test mới, audit rộng, tối ưu hay sửa lỗi ngoài phạm vi. Việc review code tách biệt với quyền thực thi; giữ nguyên sandbox và chính sách phê duyệt của người dùng. Chỉ dùng browser hoặc nghiệm thu thị giác khi được yêu cầu.
+Automatic actions are restricted to bounded local reads/searches/stop. Edits, shell commands, network actions, tests, deployment and purchases use native Codex tools and their existing approval policy. Jev probabilities never authorize those operations. Missing Jev, timeout, malformed output or insufficient confidence produce `split → Sol`, not a fabricated result.
 
-### Thông báo tiến trình
+### Evidence and scope
 
-Khi chuyển giai đoạn, gửi cập nhật ngắn: mục tiêu đang xử lý, agent nào được giao việc, kết quả vừa có và bước xác minh kế tiếp. Dùng commentary khi runtime hỗ trợ. Chỉ thông báo thao tác thực tế, không mô phỏng trạng thái hoặc cung cấp chuỗi suy nghĩ riêng tư.
+The observer reads metadata of this run and its descendants, including actual role/model/status and usage. It does not decrypt messages. If the local Codex format changes or the model/agent is unavailable, report the limitation; do not self-certify checkpoints. If not launched through run.py, say full workflow monitoring/audit is unavailable rather than running a hidden nested CLI.
+
+Do not create branches, worktrees, commits, deployments or external messages unless separately authorized. Never edit global configuration, another project, workflow scripts/settings or the journal as part of an implementation task. Do not audit the entire repository or create broad test infrastructure without need. Give concise progress updates at actual phase transitions, using evidence rather than private reasoning.
