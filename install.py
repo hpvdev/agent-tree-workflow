@@ -128,14 +128,13 @@ def install(root, args):
     workflow = (SOURCE / "templates/workflow.md").read_text()
     block = ("\n\n" if original else "") + START + "\n" + workflow + "\n" + END + "\n"
     files = {
-        "Xem Agent Tree.command": (SOURCE / "templates/watch.command").read_bytes(),
         ".agent-tree/run.py": (SOURCE / "templates/run.py").read_bytes(),
-        ".agent-tree/monitor.py": (SOURCE / "templates/monitor.py").read_bytes(),
+        ".agent-tree/launcher.py": (SOURCE / "templates/launcher.py").read_bytes(),
         ".agent-tree/.gitignore": b"logs/\n__pycache__/\n",
         ".agent-tree/install.py": Path(__file__).read_bytes(),
         ".agent-tree/settings.json": (json.dumps(settings, indent=2) + "\n").encode(),
     }
-    for name in ("runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "display.py"):
+    for name in ("runtime.py", "observer.py", "control.py", "hooks.py"):
         files[".agent-tree/" + name] = (SOURCE / "templates" / name).read_bytes()
     for role in ROLES:
         relative = ".codex/agents/agent_tree_" + role + ".toml"
@@ -162,8 +161,6 @@ def install(root, args):
             with target.open("xb") as file:
                 file.write(data)
             created.append(target)
-            if name.endswith(".command"):
-                target.chmod(0o755)
         agents.write_bytes(original + block.encode())
         local_path(root, ".codex/hooks.json").write_bytes(hook_bytes)
         (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -187,7 +184,6 @@ def install(root, args):
         raise
     print("Đã cài workflow vào: " + str(root))
     print("Kích hoạt trong Codex: mở /hooks, review và trust hooks Agent Tree. Chưa trust thì hooks chưa chạy.")
-    print("Mở Watch trên macOS: nhấp đúp " + str(root / "Xem Agent Tree.command"))
 
 
 def configure(root, args):
@@ -299,7 +295,7 @@ def main():
                 elif getattr(args, key, None) is None:
                     setattr(args, key, value)
             # Validate sources before removing the old installation.
-            for name in ("run.py", "monitor.py", "runtime.py", "observer.py", "control.py", "hooks.py", "watch.py", "watch.command", "display.py", "workflow.md"):
+            for name in ("run.py", "launcher.py", "runtime.py", "observer.py", "control.py", "hooks.py", "workflow.md"):
                 (SOURCE / "templates" / name).read_bytes()
             uninstall(root)
             install(root, args)

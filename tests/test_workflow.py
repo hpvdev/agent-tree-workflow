@@ -1,8 +1,7 @@
 import contextlib
-import importlib.util
+import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,9 +10,7 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "templates"))
-spec = importlib.util.spec_from_file_location("monitor", SOURCE / "templates/monitor.py")
-monitor = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(monitor)
+import launcher
 
 
 class WorkflowTests(unittest.TestCase):
@@ -56,7 +53,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('model = "future-worker"', role)
         self.assertIn('model_reasoning_effort = "high"', role)
         result = subprocess.run([sys.executable, str(self.root / ".agent-tree/run.py"),
-                                 "--watch", "--print-command", "Do a task"], capture_output=True, text=True)
+                                 "--print-command", "Do a task"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("future-main", result.stdout)
         self.assertIn("exec --json", result.stdout)
@@ -91,6 +88,14 @@ class WorkflowTests(unittest.TestCase):
     def test_upgrade_preserves_models_and_logs(self):
         self.cli("install")
         self.cli("configure", "--main-model", "my-next-model", "--jev-confidence", "0.92")
+        legacy = ("Xem Agent Tree.command", ".agent-tree/monitor.py", ".agent-tree/watch.py", ".agent-tree/display.py")
+        manifest_path = self.root / ".agent-tree/manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for name in legacy:
+            content = b"legacy Watch file\n"
+            (self.root / name).write_bytes(content)
+            manifest["files"][name] = hashlib.sha256(content).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
         logs = self.root / ".agent-tree/logs"
         logs.mkdir()
         (logs / "keep.jsonl").write_text("keep this log\n")
@@ -100,6 +105,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved["jev"]["confidence"], .92)
         self.assertEqual((logs / "keep.jsonl").read_text(), "keep this log\n")
         self.assertEqual((self.root / "AGENTS.md").read_text().count("<!-- agent-tree:start -->"), 1)
+        self.assertTrue((self.root / ".agent-tree/launcher.py").exists())
+        self.assertTrue(all(not (self.root / name).exists() for name in legacy))
 
     def test_hooks_merge_preserves_existing_and_later_user_hooks(self):
         (self.root / ".codex").mkdir()
@@ -120,38 +127,21 @@ class WorkflowTests(unittest.TestCase):
         self.cli("uninstall")
         self.assertEqual(json.loads(path.read_text())["hooks"]["Stop"], existing["hooks"]["Stop"] + [added])
 
-    def test_event_monitor_reports_real_states_and_failure(self):
-        view = monitor.Monitor()
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            view.accept({"type": "turn.started"})
-            view.accept({"type": "item.completed", "item": {"type": "collab_agent_tool_call", "tool": "spawn_agent",
-                         "receiver_thread_ids": ["child-1"], "agents_states": {"child-1": {"status": "running"}}}})
-            view.accept({"type": "item.completed", "item": {"type": "command_execution", "command": "pytest", "exit_code": 1}})
-            view.accept({"type": "turn.failed"})
-            view.accept({"type": "workflow.retro", "duration_seconds": 12, "agents": {"astra": 2},
-                         "jev_forks": 1, "review_restarts": 0, "tool_hook_events": 4})
-        self.assertEqual(view.agents, {"child-1": "running"})
-        self.assertTrue(view.failed)
-        self.assertFalse(view.completed)
-        self.assertIn("exit=1", output.getvalue())
-        self.assertIn("Astra 2", view.retro_summary)
-
-    def test_trace_saves_real_subprocess_stream_and_replay(self):
+    def test_launcher_saves_real_subprocess_stream_and_retro(self):
         self.cli("install")
         events = [{"type": "turn.started"}, {"type": "item.completed", "item": {"type": "agent_message", "text": "Done"}},
                   {"type": "turn.completed", "usage": {"output_tokens": 3}}]
         script = "import json; events=" + repr(events) + "; [print(json.dumps(e),flush=True) for e in events]"
         emitter = self.root / "emit.py"
         emitter.write_text(script)
-        with contextlib.redirect_stdout(io.StringIO()):
-            status = monitor.trace([sys.executable, str(emitter), "test request"], self.root, {})
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            status = launcher.trace([sys.executable, str(emitter), "test request"], self.root)
         self.assertEqual(status, 2)  # A successful Codex turn cannot fake missing Astra checkpoints.
         paths = list((self.root / ".agent-tree/logs").glob("*/codex.jsonl"))
         self.assertEqual(len(paths), 1)
         self.assertEqual([json.loads(line) for line in paths[0].read_text().splitlines()], events)
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(monitor.replay(paths[0]), 0)
         self.assertIn("Done", output.getvalue())
+        self.assertFalse(json.loads((paths[0].parent / "retro.json").read_text())["workflow_passed"])
         self.cli("uninstall")
         self.assertTrue(paths[0].exists())
 

@@ -1,6 +1,6 @@
 # Agent Tree Workflow
 
-Bộ workflow Codex cài riêng cho từng project: **Sol lập kế hoạch/viết code → Jev chọn nhánh → tool hoặc agent thực thi → Sol tích hợp/xác minh**. Astra tư vấn trước kế hoạch, khi lỗi lặp lại và trước hoàn tất. Dashboard hiển thị sự kiện thực, không tạo số liệu minh họa.
+Bộ workflow Codex cài riêng cho từng project: **Sol lập kế hoạch/viết code → Jev chọn nhánh → tool hoặc agent thực thi → Sol tích hợp/xác minh**. Astra tư vấn trước kế hoạch, khi lỗi lặp lại và trước hoàn tất.
 
 Python 3.9+, thư viện chuẩn, Codex có native subagents/hooks và Jev CLI đã xác thực. Chỉ clone repo chưa cài vào project nào. Bộ cài không sửa cấu hình toàn cục.
 
@@ -16,7 +16,7 @@ Thay `/path/to/project` bằng thư mục project có sẵn. Nếu đã clone th
 1. Mở đúng project trong Codex và dùng `/hooks` để xem, chấp thuận các hook Agent Tree theo cơ chế trust của Codex. Hook chưa được trust chưa chạy. Nếu client không có giao diện `/hooks`, dùng Codex CLI hỗ trợ hooks trong project đó để review; không tự chỉnh kho trust bằng script.
 2. Bắt đầu phiên mới và gửi yêu cầu. Hook cung cấp RUN_ID riêng cho mỗi lượt; agent làm theo khối workflow đã cài trong `AGENTS.md`.
 3. Chọn main model Sol/high trong Codex app. `settings.json` không tự đổi model đang chọn trong app. Cấu hình role xác định model của các agent con; giới hạn runtime và chính sách quản trị vẫn được ưu tiên.
-4. Mở dashboard riêng để theo dõi phiên. Không cần mở CLI lồng trong agent.
+4. Theo dõi lượt làm việc và các agent con ngay trong Codex app; retro được lưu cục bộ sau khi lượt kết thúc.
 
 Bộ cài thêm `.agent-tree/`, `.codex/agents/agent_tree_*.toml`, khối có dấu mốc trong `AGENTS.md`, và **gộp** hook của nó vào `.codex/hooks.json`. Giữ nguyên hook/cấu hình project có sẵn. Refuse file trùng, file đã sửa ngoài bộ cài và symbolic link.
 
@@ -24,7 +24,7 @@ Launcher tùy chọn áp dụng main model/effort, giới hạn agent và approv
 
 ```sh
 cd /path/to/project
-python3 .agent-tree/run.py --watch "Yêu cầu phát triển của bạn"
+python3 .agent-tree/run.py "Yêu cầu phát triển của bạn"
 ```
 
 Launcher và hooks dùng chung journal. Nếu hooks chưa hoạt động, launcher vẫn quan sát CLI/agent bằng adapter, nhưng **không xác nhận được native action đã được Jev chọn**; audit giữ phần đó chưa hoàn tất. Không coi launcher là cách bỏ qua trust.
@@ -106,33 +106,13 @@ Fork mới sau review cuối làm hết hiệu lực `before_done`. Sol cũng ph
 
 `--approve-for-me` chỉ áp dụng khi chạy launcher với `approval_mode=auto-review`. Phiên mở trực tiếp trong app dùng quyền native đã chọn; hook không tự bật hoặc phê duyệt thay Codex.
 
-## Luôn xem hoạt động của phiên
+## Nhật ký và retro
 
-**Trên macOS:** mở thư mục project bằng Finder và nhấp đúp **Xem Agent Tree.command**. Watch mở trong Terminal, tự hiển thị nhật ký của lượt mới nhất và tự chuyển khi có lượt mới. Không nhập lệnh/session ID. Nếu chưa có nhật ký, cửa sổ chờ hoạt động; hooks vẫn cần được trust trước khi thu sự kiện live. Nhật ký cũ hiển thị thời gian gốc, không giả lập một phiên đang chạy.
-
-Trên các hệ điều hành khác, chạy `python3 .agent-tree/watch.py` để có cùng chế độ tự chọn phiên. Muốn chọn cố định một phiên:
-
-```sh
-cd /path/to/project
-python3 .agent-tree/watch.py --list
-python3 .agent-tree/watch.py --session SESSION_ID
-```
-
-Dashboard vẽ cây Sol → Jev → các agent → Sol, với Astra ở cạnh. Đường nối có điểm sáng chạy và biểu tượng quay khi có hoạt động vừa ghi nhận; các xác suất Jev và trạng thái agent lấy từ sự kiện thật. Sau 15 giây không có sự kiện mới, chuyển sang chờ dữ liệu, không suy ra agent đã dừng. Nhật ký đã kết thúc đứng yên. Cửa sổ từ 89 cột × 35 dòng hiển thị cây đầy đủ; cửa sổ nhỏ tự dùng bố cục gọn.
-
-Dashboard đọc journal, không gọi model, không mở phiên làm việc mới. Nó theo dõi các lượt mới của cùng session: Jev sharp/split và lựa chọn, tool đang chạy/đã trả về, agent/role/model, checkpoint Astra. Ctrl+C chỉ đóng dashboard. Dữ liệu host chưa cung cấp, như token ở hook mode, hiển thị chưa có dữ liệu.
-
-Khi một lượt kết thúc, Stop hook tạo retro một lần từ các sự kiện đã ghi; launcher cũng tạo retro khi tiến trình dừng. Watch hiện thời gian, số lượt Astra/Jev và số lần review cuối bị hủy. Bản chi tiết nằm tại `.agent-tree/logs/<run-id>/retro.json`, chỉ chứa số đếm/trạng thái, không lưu prompt hay nội dung mã. Đây là số liệu điều phối; độ đúng của kết quả cần kiểm tra bằng yêu cầu, kiểm thử và phản hồi thực tế.
+Codex app hiển thị hoạt động của phiên và các subagent. Khi một lượt kết thúc, Stop hook tạo retro một lần từ các sự kiện đã ghi; launcher tùy chọn cũng tạo retro khi tiến trình dừng. Bản chi tiết nằm tại `.agent-tree/logs/<run-id>/retro.json`, gồm thời gian, số lượt Astra/Jev, số lần review cuối bị hủy và số sự kiện tool hook. Đây là số liệu điều phối; độ đúng của kết quả cần kiểm tra bằng yêu cầu, kiểm thử và phản hồi thực tế.
 
 Log cục bộ trong `.agent-tree/logs/RUN_ID/events.sqlite3`; index phiên ở `logs/sessions/`. Hook log không giữ raw prompt/tool output. Launcher còn lưu `codex.jsonl`, `timeline.jsonl`, `stderr.log` có thể chứa nội dung task; không chia sẻ nếu chưa kiểm tra. Logs được bỏ qua khi commit Git và giữ lại khi gỡ.
 
-Xem lại log launcher:
-
-```sh
-python3 .agent-tree/run.py --replay .agent-tree/logs/RUN_ID
-```
-
-Đây là dashboard terminal, không phải widget bên trong Codex app. Không hiển thị suy nghĩ riêng tư hoặc tạo số liệu token/giá giả.
+Không có cửa sổ Watch riêng. Nhật ký và retro vẫn được giữ trong project để kiểm tra khi cần.
 
 ## Đổi model, cập nhật và gỡ
 
