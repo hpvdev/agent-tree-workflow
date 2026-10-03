@@ -106,6 +106,10 @@ Fork mới sau review cuối làm hết hiệu lực `before_done`. Sol cũng ph
 
 ## Luôn xem hoạt động của phiên
 
+**Trên macOS:** mở thư mục project bằng Finder và nhấp đúp **Xem Agent Tree.command**. Watch mở trong Terminal, tự hiển thị nhật ký của lượt mới nhất và tự chuyển khi có lượt mới. Không nhập lệnh/session ID. Nếu chưa có nhật ký, cửa sổ chờ hoạt động; hooks vẫn cần được trust trước khi thu sự kiện live. Nhật ký cũ hiển thị thời gian gốc, không giả lập một phiên đang chạy.
+
+Trên các hệ điều hành khác, chạy `python3 .agent-tree/watch.py` để có cùng chế độ tự chọn phiên. Muốn chọn cố định một phiên:
+
 ```sh
 cd /path/to/project
 python3 .agent-tree/watch.py --list

@@ -17,6 +17,22 @@ def read_state(path, key):
     return json.loads(row[0]) if row else None
 
 
+def latest_run(root):
+    """Pick the newest real run, including launcher runs created before hooks."""
+    candidates = []
+    for path in (root / ".agent-tree/logs").glob("*/events.sqlite3"):
+        if path.parent.name == "sessions" or path.is_symlink() or path.parent.is_symlink():
+            continue
+        try:
+            with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+                timestamp = db.execute("SELECT MIN(time) FROM events WHERE type IN ('session.turn','fork.started')").fetchone()[0]
+            if timestamp:
+                candidates.append((timestamp, path.parent.name))
+        except sqlite3.Error:
+            continue  # A journal may still be initializing.
+    return max(candidates)[1] if candidates else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Theo dõi phiên Codex độc lập, không gọi model")
     parser.add_argument("--session", help="Session ID của phiên cần theo dõi")
@@ -33,20 +49,20 @@ def main():
                 if value.get("role") == "main":
                     print(key.removeprefix("session:"), value["run_id"])
         return
-    if not args.session:
-        parser.error("Chọn --session ID hoặc dùng --list trước.")
     active = None
     cursor = 0
     view = Monitor(settings(ROOT), live=True)
-    print("Đang chờ sự kiện của phiên " + args.session + ". Ctrl+C chỉ đóng bảng theo dõi.")
+    print("AGENT TREE WATCH · " + ROOT.name, flush=True)
+    print("Theo dõi phiên mới nhất. Nhật ký cũ được giữ nguyên; có phiên mới sẽ tự chuyển sang." if not args.session else "Theo dõi phiên " + args.session, flush=True)
+    print("Chưa có hoạt động thì bảng sẽ chờ. Ctrl+C chỉ đóng Watch, không dừng Codex.", flush=True)
     try:
         while True:
-            state = read_state(index, "session:" + args.session)
-            if state:
-                run = state["run_id"]
+            state = read_state(index, "session:" + args.session) if args.session else None
+            run = state["run_id"] if state else (latest_run(ROOT) if not args.session else None)
+            if run:
                 if run != active:
                     active, cursor = run, 0
-                    view = Monitor(settings(ROOT), live=True)
+                    view = Monitor(settings(ROOT), live=True, caption=ROOT.name + " · " + run + " · nhật ký theo thời gian ghi nhận")
                     print("Lượt: " + run)
                 path = ROOT / ".agent-tree/logs" / run / "events.sqlite3"
                 if path.exists():

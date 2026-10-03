@@ -18,9 +18,10 @@ def clean(value, limit=160):
 
 
 class Monitor:
-    def __init__(self, settings=None, live=False):
+    def __init__(self, settings=None, live=False, caption=""):
         self.settings = settings or {}
         self.live = live and sys.stdout.isatty()
+        self.caption = caption
         self.events = deque(maxlen=12)
         self.agents = {}
         self.status = "Chờ sự kiện"
@@ -78,6 +79,7 @@ class Monitor:
             label = "ASTRA · " + event["name"] + " · " + self.checkpoints[event["name"]]
         elif kind == "workflow.audit":
             label = "Workflow: đủ checkpoint" if event["passed"] else "Workflow: còn thiếu checkpoint hoặc quyết định chưa xử lý"
+            self.status = "Đủ checkpoint" if event["passed"] else "Chưa đủ checkpoint"
         elif kind == "observer.warning":
             label = event["message"]
         elif kind == "failure.observed":
@@ -131,6 +133,8 @@ class Monitor:
         if self.live:
             print("\033[2J\033[H", end="")
             print("AGENT TREE  |  " + self.status)
+            if self.caption:
+                print(clean(self.caption))
             print("Main cấu hình: " + clean(self.settings.get("main_model", "không có")))
             print("Jev: " + str(self.forks) + " forks | sharp " + str(self.sharp) + " | split → Sol " + str(self.split))
             for fork_kind, decision in self.decisions.items():
