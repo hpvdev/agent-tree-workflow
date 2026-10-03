@@ -10,6 +10,8 @@ import os
 import queue
 import threading
 import atexit
+import shutil
+import unicodedata
 from display import frame, BACKGROUND
 from runtime import Journal
 from observer import Observer
@@ -17,6 +19,21 @@ from observer import Observer
 
 def clean(value, limit=160):
     return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value))[:limit]
+
+
+def fit_terminal_line(text, columns):
+    """Keep color escapes, but bound visible cells so a frame never wraps."""
+    result, used = [], 0
+    for token in re.findall(r"\x1b\[[0-9;]*m|[^\x1b]", text):
+        if token.startswith("\x1b"):
+            result.append(token)
+            continue
+        cells = 0 if unicodedata.combining(token) or unicodedata.category(token) == "Cf" else (2 if unicodedata.east_asian_width(token) in ("W", "F") else 1)
+        if used + cells > columns:
+            break
+        result.append(token)
+        used += cells
+    return "".join(result)
 
 
 class Monitor:
@@ -161,9 +178,17 @@ class Monitor:
         if not self.live:
             return
         rendered = frame(self)
-        if rendered != self.last_frame:
-            print(BACKGROUND + ("\033[2J" if self.last_frame is None else "") + "\033[H" + rendered + "\033[J", end="", flush=True)
-            self.last_frame = rendered
+        size = shutil.get_terminal_size((100, 40))
+        current = (rendered, size)
+        if current != self.last_frame:
+            # Absolute row positions avoid newline/wrap scrolling. Erase EVERY
+            # row: a shorter new line must not retain text from the old frame.
+            rows = rendered.splitlines()[:max(1, size.lines - 1)]
+            output = BACKGROUND + ("\033[2J" if self.last_frame is None else "")
+            for row, line in enumerate(rows, 1):
+                output += "\033[" + str(row) + ";1H" + BACKGROUND + "\033[2K" + fit_terminal_line(line, max(0, size.columns - 1))
+            print(output + BACKGROUND + "\033[J", end="", flush=True)
+            self.last_frame = current
 
     def restore_colors(self):
         if self.live:
