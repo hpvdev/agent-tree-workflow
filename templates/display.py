@@ -4,8 +4,9 @@ import shutil
 import time
 from datetime import datetime
 
-COLORS = {"sol": "\033[38;5;215m", "jev": "\033[38;5;155m", "astra": "\033[38;5;211m", "agent": "\033[38;5;147m", "dim": "\033[38;5;245m"}
-RESET = "\033[0m"
+BACKGROUND = "\033[48;5;234m\033[38;5;252m"
+COLORS = {"sol": "\033[38;5;215m", "jev": "\033[38;5;155m", "astra": "\033[38;5;211m", "agent": "\033[38;5;147m", "dim": "\033[38;5;250m"}
+RESET = "\033[0m" + BACKGROUND
 
 
 def safe(value):

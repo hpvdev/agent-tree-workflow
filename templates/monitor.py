@@ -9,7 +9,8 @@ import sys
 import os
 import queue
 import threading
-from display import frame
+import atexit
+from display import frame, BACKGROUND
 from runtime import Journal
 from observer import Observer
 
@@ -22,6 +23,8 @@ class Monitor:
     def __init__(self, settings=None, live=False, caption=""):
         self.settings = settings or {}
         self.live = live and sys.stdout.isatty()
+        if self.live:
+            atexit.register(self.restore_colors)
         self.caption = caption
         self.events = deque(maxlen=12)
         self.agents = {}
@@ -159,8 +162,12 @@ class Monitor:
             return
         rendered = frame(self)
         if rendered != self.last_frame:
-            print("\033[H" + rendered + "\033[J", end="", flush=True)
+            print(BACKGROUND + ("\033[2J" if self.last_frame is None else "") + "\033[H" + rendered + "\033[J", end="", flush=True)
             self.last_frame = rendered
+
+    def restore_colors(self):
+        if self.live:
+            print("\033[0m", end="", flush=True)
 
 
 def replay(path):
