@@ -128,10 +128,13 @@ class WorkflowTests(unittest.TestCase):
                          "receiver_thread_ids": ["child-1"], "agents_states": {"child-1": {"status": "running"}}}})
             view.accept({"type": "item.completed", "item": {"type": "command_execution", "command": "pytest", "exit_code": 1}})
             view.accept({"type": "turn.failed"})
+            view.accept({"type": "workflow.retro", "duration_seconds": 12, "agents": {"astra": 2},
+                         "jev_forks": 1, "review_restarts": 0, "tool_hook_events": 4})
         self.assertEqual(view.agents, {"child-1": "running"})
         self.assertTrue(view.failed)
         self.assertFalse(view.completed)
         self.assertIn("exit=1", output.getvalue())
+        self.assertIn("Astra 2", view.retro_summary)
 
     def test_trace_saves_real_subprocess_stream_and_replay(self):
         self.cli("install")

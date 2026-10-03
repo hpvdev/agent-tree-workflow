@@ -122,6 +122,8 @@ Dashboard vẽ cây Sol → Jev → các agent → Sol, với Astra ở cạnh. 
 
 Dashboard đọc journal, không gọi model, không mở phiên làm việc mới. Nó theo dõi các lượt mới của cùng session: Jev sharp/split và lựa chọn, tool đang chạy/đã trả về, agent/role/model, checkpoint Astra. Ctrl+C chỉ đóng dashboard. Dữ liệu host chưa cung cấp, như token ở hook mode, hiển thị chưa có dữ liệu.
 
+Khi một lượt kết thúc, Stop hook tạo retro một lần từ các sự kiện đã ghi; launcher cũng tạo retro khi tiến trình dừng. Watch hiện thời gian, số lượt Astra/Jev và số lần review cuối bị hủy. Bản chi tiết nằm tại `.agent-tree/logs/<run-id>/retro.json`, chỉ chứa số đếm/trạng thái, không lưu prompt hay nội dung mã. Đây là số liệu điều phối; độ đúng của kết quả cần kiểm tra bằng yêu cầu, kiểm thử và phản hồi thực tế.
+
 Log cục bộ trong `.agent-tree/logs/RUN_ID/events.sqlite3`; index phiên ở `logs/sessions/`. Hook log không giữ raw prompt/tool output. Launcher còn lưu `codex.jsonl`, `timeline.jsonl`, `stderr.log` có thể chứa nội dung task; không chia sẻ nếu chưa kiểm tra. Logs được bỏ qua khi commit Git và giữ lại khi gỡ.
 
 Xem lại log launcher:

@@ -9,7 +9,7 @@ import shlex
 import re
 import sys
 from runtime import Journal, ROOT
-from control import failure, finish, native_event
+from control import failure, finish, finalize_retro, native_event
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest",
           "SubagentStart", "SubagentStop", "Stop", "Interrupt", "SessionEnd")
@@ -226,6 +226,7 @@ def handle(data, root=ROOT):
                 journal.put("stop_reminded", True)
                 return {"decision": "block", "reason": "Agent Tree audit incomplete for run " + run + ": " + json.dumps(audit) + ". Complete missing steps if possible; otherwise report the actual limitation. Do not edit journal or fabricate reviews."}
             journal.emit("session.turn_completed", session=session)
+            finalize_retro(journal, True)
         elif event in ("Interrupt", "SessionEnd"):
             journal.emit("session.lifecycle", session=session, status=event)
         return {}

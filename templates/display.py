@@ -54,8 +54,10 @@ def frame(view, now=None, columns=None):
         lines += [COLORS["jev"] + "╰" + line + "╯" + RESET,
                   COLORS["agent"] + "  ↓ WORKER " + status("worker") + "   ↓ EXPLORER " + status("explorer") + "   ↓ RESEARCHER " + status("researcher") + RESET,
                   COLORS["astra"] + "ASTRA · " + " · ".join(("✓ " if value == "completed" else pulse + " ") + key for key, value in view.checkpoints.items()) + RESET,
-                  COLORS["sol"] + "  └─────────► SOL · REVIEW / VERIFY" + RESET,
-                  "Kéo rộng cửa sổ để xem đầy đủ cây và model từng agent."]
+                  COLORS["sol"] + "  └─────────► SOL · REVIEW / VERIFY" + RESET]
+        if view.retro_summary:
+            lines.append(safe(view.retro_summary)[:width])
+        lines.append("Kéo rộng cửa sổ để xem đầy đủ cây và model từng agent.")
         count = max(0, min(3, height - len(lines) - 2))
         if count:
             lines += [safe(line)[-width:] for line in list(view.events)[-count:]]
@@ -92,6 +94,8 @@ def frame(view, now=None, columns=None):
     put(0, 0, "CODEX AGENT TREE", "sol")
     put(24, 0, heading, "jev" if alive else "dim")
     put(0, 1, safe(view.caption)[:width])
+    if view.retro_summary:
+        put(0, 2, view.retro_summary[:width], "sol")
     astra = [d for d in view.agent_details.values() if d.get("role") == "agent_tree_astra"]
     busy_astra = any(d.get("status") == "running" for d in astra)
     counts = [(d.get("usage") or {}).get("input_tokens") for d in astra]

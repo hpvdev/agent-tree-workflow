@@ -288,6 +288,42 @@ def finish(journal):
     return {"passed": passed, "missing": missing, "unresolved": pending}
 
 
+def finalize_retro(journal, passed):
+    """Summarize observed coordination once, after the turn has ended."""
+    existing = journal.get("retro")
+    if existing:
+        return existing
+    events = journal.events()
+    agents = {event["id"]: event.get("role", "unknown") for event in events
+              if event["type"] == "agent.observed" and event.get("id")}
+    counts = {role: sum(value == "agent_tree_" + role for value in agents.values())
+              for role in ("astra", "worker", "explorer", "researcher")}
+    decisions = [event for event in events if event["type"] == "fork.decided"]
+    first = datetime.fromisoformat(events[0]["time"]) if events else datetime.now(timezone.utc)
+    last = datetime.fromisoformat(events[-1]["time"]) if events else first
+    report = {
+        "run_id": journal.run_id,
+        "workflow_passed": passed,
+        "duration_seconds": max(0, round((last - first).total_seconds())),
+        "agents": counts,
+        "jev_forks": sum(event["type"] == "fork.started" for event in events),
+        "jev_sharp": sum(event.get("route") == "sharp" for event in decisions),
+        "jev_split": sum(event.get("route") == "split" for event in decisions),
+        "review_restarts": sum(event["type"] == "checkpoint.invalidated" and event.get("name") == "before_done" for event in events),
+        "tool_hook_events": sum(event["type"] == "tool.activity" for event in events),
+        "failed_tool_calls": sum(event["type"] == "tool.activity" and event.get("status") == "failed" for event in events),
+        "quality": "not_measured",
+    }
+    try:
+        (journal.directory / "retro.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        (journal.directory / "retro.json").chmod(0o600)
+    except OSError:
+        pass  # A reporting file must not block a completed Codex turn.
+    journal.put("retro", report)
+    journal.emit("workflow.retro", **report)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tầng quyết định Jev và checkpoint Agent Tree")
     parser.add_argument("--run-id")

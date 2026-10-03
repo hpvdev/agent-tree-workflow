@@ -60,6 +60,7 @@ class Monitor:
         self.phase = None
         self.playback = False
         self.last_frame = None
+        self.retro_summary = ""
 
     def accept(self, event):
         kind = event.get("type", "unknown")
@@ -119,6 +120,13 @@ class Monitor:
         elif kind == "workflow.audit":
             label = "Workflow: đủ checkpoint" if event["passed"] else "Workflow: còn thiếu checkpoint hoặc quyết định chưa xử lý"
             self.status = "Đủ checkpoint" if event["passed"] else "Chưa đủ checkpoint"
+        elif kind == "workflow.retro":
+            self.retro_summary = ("Retro: " + str(event.get("duration_seconds", 0)) + "s · Astra " +
+                                  str(event.get("agents", {}).get("astra", 0)) + " · Jev " +
+                                  str(event.get("jev_forks", 0)) + " · review lại " +
+                                  str(event.get("review_restarts", 0)) + " · hook " +
+                                  str(event.get("tool_hook_events", 0)))
+            label = self.retro_summary
         elif kind == "observer.warning":
             label = event["message"]
         elif kind == "failure.observed":
@@ -215,7 +223,7 @@ def replay(path):
 
 
 def trace(command, root, settings):
-    from control import finish
+    from control import finish, finalize_retro
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     journal = Journal(root, stamp)
     observer = Observer(journal)
@@ -286,6 +294,7 @@ def trace(command, root, settings):
         if journal.get("transport") != "hooks":
             observer.poll()
         audit = finish(journal)
+        finalize_retro(journal, audit["passed"] and result == 0)
         for event in journal.events(cursor):
             monitor.accept(event)
             timeline.write(json.dumps(event) + "\n")

@@ -192,6 +192,31 @@ class ForkTests(unittest.TestCase):
         with JournalContext(self.root, next_run) as journal:
             self.assertIsNone(journal.get("agent:review"))
 
+    def test_stop_creates_one_retro_from_observed_events(self):
+        base = {"cwd": str(self.root), "session_id": "retro-parent", "turn_id": "one"}
+        handle({**base, "hook_event_name": "UserPromptSubmit"}, self.root)
+        with JournalContext(self.root, "sessions") as index:
+            run = index.get("session:retro-parent")["run_id"]
+        with JournalContext(self.root, run) as journal:
+            journal.put("checkpoint:before_plan", {"status": "completed"})
+            journal.put("checkpoint:before_done", {"status": "completed"})
+            journal.emit("agent.observed", id="review", role="agent_tree_astra")
+            journal.emit("fork.started", kind="which_file")
+            journal.emit("fork.decided", kind="which_file", route="split")
+            journal.emit("checkpoint.invalidated", name="before_done")
+            journal.emit("tool.activity", status="returned")
+        self.assertEqual(handle({**base, "hook_event_name": "Stop"}, self.root), {})
+        self.assertEqual(handle({**base, "hook_event_name": "Stop"}, self.root), {})
+        with JournalContext(self.root, run) as journal:
+            report = journal.get("retro")
+            self.assertEqual(report["agents"]["astra"], 1)
+            self.assertEqual(report["jev_forks"], 1)
+            self.assertEqual(report["review_restarts"], 1)
+            self.assertEqual(report["tool_hook_events"], 1)
+            self.assertEqual(report["quality"], "not_measured")
+            self.assertEqual(sum(event["type"] == "workflow.retro" for event in journal.events()), 1)
+            self.assertEqual(json.loads((journal.directory / "retro.json").read_text()), report)
+
     def test_launcher_and_hooks_share_run_even_when_prompt_event_replays(self):
         base = {"cwd": str(self.root), "session_id": "launched-parent", "hook_event_name": "UserPromptSubmit", "turn_id": "one"}
         with patch.dict("os.environ", {"AGENT_TREE_RUN": "test"}):
